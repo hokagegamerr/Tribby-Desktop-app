@@ -1,88 +1,210 @@
+"""
+Tribby — Your Personal Financial Assistant
+A warm, friendly desktop app that feels like a chat with a smart friend.
+"""
+
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 import json
 import os
+import shutil
 from datetime import datetime, timedelta
 import csv
+import threading
+import random
 
-# For charts
+# ── Desktop extras ────────────────────────────────────────────────────────────
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
+try:
+    from plyer import notification
+    HAS_NOTIFY = True
+except ImportError:
+    HAS_NOTIFY = False
+
+try:
+    import reportlab
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    HAS_PDF = True
+except ImportError:
+    HAS_PDF = False
+
+# ── Matplotlib ────────────────────────────────────────────────────────────────
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.patches as mpatches
+
+# ── Constants ──────────────────────────────────────────────────────────────────
 
 CATEGORY_COLORS = [
-    "#00F0FF", "#A855F7", "#22C55E", "#F59E0B", "#EF4444",
-    "#3B82F6", "#EC4899", "#84CC16", "#FB923C", "#14B8A6",
-    "#8B5CF6", "#F43F5E",
+    "#00E5FF", "#CE93D8", "#69F0AE", "#FFD740", "#FF5252",
+    "#82B1FF", "#FFAB40", "#F48FB1", "#80CBC4", "#E6EE9C",
+    "#80DEEA", "#BCAAA4",
 ]
 
-DEFAULT_CATEGORIES = ["Food", "Bills", "Transport", "Shopping", "Entertainment", "Health", "Other"]
+CATEGORY_EMOJIS = {
+    "food": "🍱", "dining": "🍱", "restaurant": "🍱", "coffee": "☕",
+    "bills": "🧾", "subscription": "🧾", "utility": "💡",
+    "transport": "🚗", "car": "🚗", "fuel": "⛽", "commute": "🚌",
+    "shopping": "🛍️", "market": "🛒", "cloth": "👕",
+    "entertainment": "🎮", "movie": "🎬", "game": "🎮", "stream": "📺",
+    "health": "💊", "med": "💊", "gym": "💪", "doctor": "🏥",
+    "salary": "💰", "income": "💰", "pay": "💳", "earn": "💰",
+    "home": "🏠", "rent": "🏠", "house": "🏠",
+    "education": "📚", "school": "📚", "book": "📖", "tuition": "🎓",
+    "travel": "✈️", "flight": "✈️", "hotel": "🏨",
+    "pet": "🐾", "gift": "🎁", "present": "🎁",
+    "savings": "🏦", "investment": "📈",
+}
 
+DEFAULT_CATEGORIES = ["Food", "Bills", "Transport", "Shopping", "Entertainment", "Health", "Savings", "Other"]
 RECUR_INTERVALS = ["Daily", "Weekly", "Monthly", "Yearly"]
 
+FONT_FAMILY = "Segoe UI"
 
-# ------------------------------------------------------------
-# Data Manager (JSON storage)
-# ------------------------------------------------------------
+# ── Motivational quotes ──────────────────────────────────────────────────────
+QUOTES = [
+    "A budget is telling your money where to go instead of wondering where it went.",
+    "Financial freedom is available to those who learn about it and work for it.",
+    "Do not save what is left after spending, but spend what is left after saving.",
+    "The best investment you can make is in yourself.",
+    "It's not about having a lot of money. It's about knowing how to manage it.",
+]
+
+def cat_emoji(category: str) -> str:
+    cat = category.lower()
+    for key, emoji in CATEGORY_EMOJIS.items():
+        if key in cat:
+            return emoji
+    return "📦"
+
+# ── Themes ────────────────────────────────────────────────────────────────────
+
+THEMES = {
+    "dark": {
+        "mode": "dark",
+        "bg":            "#0F1117",
+        "card":          "#1A1D27",
+        "card_light":    "#252838",
+        "sidebar":       "#0A0D14",
+        "border":        "#2E3250",
+        "text":          "#E8EAF6",
+        "text_muted":    "#8B93B8",
+        "cyan":          "#00E5FF",
+        "purple":        "#CE93D8",
+        "success":       "#69F0AE",
+        "danger":        "#FF5252",
+        "warning":       "#FFD740",
+        "row_alt":       "#1E2133",
+        "input_bg":      "#1A1D27",
+    },
+    "light": {
+        "mode": "light",
+        "bg":            "#F4F6FB",
+        "card":          "#FFFFFF",
+        "card_light":    "#F0F2FA",
+        "sidebar":       "#E9EDF5",
+        "border":        "#D0D5E8",
+        "text":          "#1A1D27",
+        "text_muted":    "#6B7299",
+        "cyan":          "#0097A7",
+        "purple":        "#7B1FA2",
+        "success":       "#2E7D32",
+        "danger":        "#C62828",
+        "warning":       "#F57F17",
+        "row_alt":       "#EBECF5",
+        "input_bg":      "#F0F2FA",
+    },
+}
+
+# ── Data Manager ──────────────────────────────────────────────────────────────
+
 class DataManager:
     def __init__(self):
-        self.transactions_file = "tribby_transactions.json"
-        self.budget_file = "tribby_budget.json"
-        self.goals_file = "tribby_goals.json"
-        self.category_budgets_file = "tribby_category_budgets.json"
-        self.recurring_file = "tribby_recurring.json"
-        self.settings_file = "tribby_settings.json"
+        self.transactions_file    = "tribby_transactions.json"
+        self.budget_file          = "tribby_budget.json"
+        self.goals_file           = "tribby_goals.json"
+        self.category_budgets_file= "tribby_category_budgets.json"
+        self.recurring_file       = "tribby_recurring.json"
+        self.settings_file        = "tribby_settings.json"
         self.load_all()
         self.process_recurring()
+        self.start_backup_timer()
 
     def load_all(self):
-        self.transactions = self._load_json(self.transactions_file, [])
-        self.budget = self._load_json(self.budget_file, 20000)
-        self.goals = self._load_json(self.goals_file, [])
-        self.category_budgets = self._load_json(self.category_budgets_file, {})
-        self.recurring = self._load_json(self.recurring_file, [])
-        self.settings = self._load_json(self.settings_file, {"theme": "dark"})
+        self.transactions    = self._load(self.transactions_file, [])
+        self.budget          = self._load(self.budget_file, 20000)
+        self.goals           = self._load(self.goals_file, [])
+        self.category_budgets= self._load(self.category_budgets_file, {})
+        self.recurring       = self._load(self.recurring_file, [])
+        self.settings        = self._load(self.settings_file, {"theme": "dark", "user_name": "Friend"})
 
-    def _load_json(self, file, default):
+    def _load(self, file, default):
         if os.path.exists(file):
             try:
                 with open(file, "r") as f:
                     return json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except Exception:
                 return default
         return default
 
-    def _save_json(self, file, data):
+    def _save(self, file, data):
         with open(file, "w") as f:
             json.dump(data, f, indent=2)
 
-    def save_transactions(self): self._save_json(self.transactions_file, self.transactions)
-    def save_budget(self): self._save_json(self.budget_file, self.budget)
-    def save_goals(self): self._save_json(self.goals_file, self.goals)
-    def save_category_budgets(self): self._save_json(self.category_budgets_file, self.category_budgets)
-    def save_recurring(self): self._save_json(self.recurring_file, self.recurring)
-    def save_settings(self): self._save_json(self.settings_file, self.settings)
+    def save_transactions(self):  self._save(self.transactions_file, self.transactions)
+    def save_budget(self):        self._save(self.budget_file, self.budget)
+    def save_goals(self):         self._save(self.goals_file, self.goals)
+    def save_category_budgets(self): self._save(self.category_budgets_file, self.category_budgets)
+    def save_recurring(self):     self._save(self.recurring_file, self.recurring)
+    def save_settings(self):      self._save(self.settings_file, self.settings)
 
-    # ---------- Transactions ----------
-    def add_transaction(self, description, amount, category, date=None):
+    def start_backup_timer(self):
+        def backup():
+            while True:
+                import time
+                time.sleep(3600)
+                self.create_backup()
+        threading.Thread(target=backup, daemon=True).start()
+
+    def create_backup(self):
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            for f in [self.transactions_file, self.goals_file, self.recurring_file]:
+                if os.path.exists(f):
+                    shutil.copy(f, f"backup_{timestamp}_{f}")
+        except Exception:
+            pass
+
+    # ── Transactions ──────────────────────────────────────────────────────────
+    def add_transaction(self, description, amount, category, date=None, notes=""):
         txn = {
-            "id": int(datetime.now().timestamp() * 1000) + len(self.transactions),
+            "id":          int(datetime.now().timestamp() * 1000) + len(self.transactions),
             "description": description,
-            "amount": amount,
-            "category": category,
-            "date": (date or datetime.now()).isoformat()
+            "amount":      amount,
+            "category":    category,
+            "date":        (date or datetime.now()).isoformat(),
+            "notes":       notes,
         }
         self.transactions.append(txn)
         self.save_transactions()
         return txn
 
-    def update_transaction(self, txn_id, description, amount, category):
+    def update_transaction(self, txn_id, description, amount, category, notes=""):
         for t in self.transactions:
             if t["id"] == txn_id:
                 t["description"] = description
-                t["amount"] = amount
-                t["category"] = category
+                t["amount"]      = amount
+                t["category"]    = category
+                t["notes"]       = notes
                 break
         self.save_transactions()
 
@@ -97,25 +219,24 @@ class DataManager:
     def all_categories(self):
         cats = set(DEFAULT_CATEGORIES)
         for t in self.transactions:
-            if t.get("category"):
-                cats.add(t["category"])
+            if t.get("category"): cats.add(t["category"])
         for r in self.recurring:
-            if r.get("category"):
-                cats.add(r["category"])
+            if r.get("category"): cats.add(r["category"])
         return sorted(cats)
 
-    # ---------- Goals ----------
-    def add_goal(self, name, target):
-        goal = {
-            "id": int(datetime.now().timestamp() * 1000),
-            "name": name,
-            "target": target,
-            "current": 0,
-            "createdAt": datetime.now().isoformat()
+    # ── Goals ─────────────────────────────────────────────────────────────────
+    def add_goal(self, name, target, target_date=None):
+        g = {
+            "id":          int(datetime.now().timestamp() * 1000),
+            "name":        name,
+            "target":      target,
+            "current":     0,
+            "createdAt":   datetime.now().isoformat(),
+            "target_date": target_date,
         }
-        self.goals.append(goal)
+        self.goals.append(g)
         self.save_goals()
-        return goal
+        return g
 
     def update_goal(self, goal_id, added):
         for g in self.goals:
@@ -128,7 +249,7 @@ class DataManager:
         self.goals = [g for g in self.goals if g["id"] != goal_id]
         self.save_goals()
 
-    # ---------- Category budgets ----------
+    # ── Category budgets ──────────────────────────────────────────────────────
     def set_category_budget(self, category, amount):
         if amount <= 0:
             self.category_budgets.pop(category, None)
@@ -136,15 +257,15 @@ class DataManager:
             self.category_budgets[category] = amount
         self.save_category_budgets()
 
-    # ---------- Recurring ----------
+    # ── Recurring ─────────────────────────────────────────────────────────────
     def add_recurring(self, description, amount, category, interval, next_date):
         rec = {
-            "id": int(datetime.now().timestamp() * 1000) + len(self.recurring),
+            "id":          int(datetime.now().timestamp() * 1000) + len(self.recurring),
             "description": description,
-            "amount": amount,
-            "category": category,
-            "interval": interval,
-            "next_date": next_date.isoformat(),
+            "amount":      amount,
+            "category":    category,
+            "interval":    interval,
+            "next_date":   next_date.isoformat(),
         }
         self.recurring.append(rec)
         self.save_recurring()
@@ -156,1181 +277,1520 @@ class DataManager:
 
     @staticmethod
     def _advance(date, interval):
-        if interval == "Daily":
-            return date + timedelta(days=1)
-        if interval == "Weekly":
-            return date + timedelta(weeks=1)
+        if interval == "Daily":   return date + timedelta(days=1)
+        if interval == "Weekly":  return date + timedelta(weeks=1)
         if interval == "Monthly":
-            month = date.month + 1
-            year = date.year + (month - 1) // 12
-            month = (month - 1) % 12 + 1
-            day = min(date.day, 28)
-            return date.replace(year=year, month=month, day=day)
+            m = date.month + 1; y = date.year + (m - 1) // 12; m = (m - 1) % 12 + 1
+            return date.replace(year=y, month=m, day=min(date.day, 28))
         if interval == "Yearly":
-            try:
-                return date.replace(year=date.year + 1)
-            except ValueError:
-                return date.replace(year=date.year + 1, day=28)
+            try:    return date.replace(year=date.year + 1)
+            except: return date.replace(year=date.year + 1, day=28)
         return date
 
     def process_recurring(self):
-        """Auto-generate transactions for any recurring items due up to today."""
-        now = datetime.now()
-        changed = False
+        now = datetime.now(); changed = False
         for r in self.recurring:
-            next_date = datetime.fromisoformat(r["next_date"])
-            guard = 0
-            while next_date <= now and guard < 500:
-                self.add_transaction(r["description"], r["amount"], r["category"], date=next_date)
-                next_date = self._advance(next_date, r["interval"])
-                changed = True
-                guard += 1
-            r["next_date"] = next_date.isoformat()
-        if changed:
-            self.save_recurring()
-
-
-# ------------------------------------------------------------
-# Theme palettes
-# ------------------------------------------------------------
-THEMES = {
-    "dark": {
-        "mode": "dark",
-        "bg": "#0D1117",
-        "card_bg": "#161B22",
-        "card_bg_light": "#1F242F",
-        "sidebar": "#0A0E12",
-        "border": "#30363D",
-        "text": "#FFFFFF",
-        "text_muted": "#8B949E",
-        "cyan": "#00F0FF",
-        "purple": "#A855F7",
-        "success": "#22C55E",
-        "danger": "#EF4444",
-        "warning": "#F59E0B",
-        "row_alt": "#1A1F29",
-    },
-    "light": {
-        "mode": "light",
-        "bg": "#F4F6FA",
-        "card_bg": "#FFFFFF",
-        "card_bg_light": "#FFFFFF",
-        "sidebar": "#E9EDF5",
-        "border": "#D7DCE5",
-        "text": "#0D1117",
-        "text_muted": "#5C6573",
-        "cyan": "#0891B2",
-        "purple": "#7C3AED",
-        "success": "#16A34A",
-        "danger": "#DC2626",
-        "warning": "#D97706",
-        "row_alt": "#F0F2F7",
-    },
-}
-
-
-# ------------------------------------------------------------
-# Main Application
-# ------------------------------------------------------------
-class TribbyApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title("Tribby - Modern Finance Tracker")
-        self.geometry("1500x950")
-        self.minsize(1300, 800)
-
-        self.data = DataManager()
-        self.current_view = "dashboard"
-        self.filter_var = ctk.StringVar(value="all")
-        self.category_filter_var = ctk.StringVar(value="All")
-        self.search_var = ctk.StringVar(value="")
-        self.sort_var = ctk.StringVar(value="Date (newest)")
-        self.editing_txn_id = None
-
-        theme_name = self.data.settings.get("theme", "dark")
-        if theme_name not in THEMES:
-            theme_name = "dark"
-        self.theme_name = theme_name
-        self.apply_theme_palette()
-
-        ctk.set_appearance_mode(THEMES[self.theme_name]["mode"])
-        ctk.set_default_color_theme("blue")
-
-        self.setup_ui()
-        self.refresh_all()
-
-    def apply_theme_palette(self):
-        t = THEMES[self.theme_name]
-        self.bg = t["bg"]
-        self.card_bg = t["card_bg"]
-        self.card_bg_light = t["card_bg_light"]
-        self.sidebar_color = t["sidebar"]
-        self.border = t["border"]
-        self.text = t["text"]
-        self.text_muted = t["text_muted"]
-        self.cyan = t["cyan"]
-        self.purple = t["purple"]
-        self.success = t["success"]
-        self.danger = t["danger"]
-        self.warning = t["warning"]
-        self.row_alt = t["row_alt"]
-
-    def category_color(self, category):
-        cats = self.data.all_categories()
-        if category in cats:
-            idx = cats.index(category) % len(CATEGORY_COLORS)
-        else:
-            idx = hash(category) % len(CATEGORY_COLORS)
-        return CATEGORY_COLORS[idx]
-
-    # ------------------------------------------------------------
-    # UI SHELL
-    # ------------------------------------------------------------
-    def setup_ui(self):
-        self.configure(fg_color=self.bg)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-
-        # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=260, corner_radius=0, fg_color=self.sidebar_color)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_propagate(False)
-
-        # Logo
-        logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        logo_frame.pack(pady=(30, 40))
-        ctk.CTkLabel(logo_frame, text="\U0001F4B0", font=("Segoe UI", 34)).pack()
-        ctk.CTkLabel(logo_frame, text="T R I B B Y", font=("Segoe UI", 18, "bold"), text_color=self.cyan).pack()
-        ctk.CTkLabel(logo_frame, text="modern finance tracker", font=("Segoe UI", 10), text_color=self.text_muted).pack()
-
-        # Navigation buttons
-        nav_buttons = [
-            ("\U0001F4CA Dashboard", "dashboard", self.show_dashboard),
-            ("\U0001F4DD Transactions", "transactions", self.show_transactions),
-            ("\U0001F4B0 Budget & Goals", "budget", self.show_budget_goals),
-            ("\U0001F501 Recurring", "recurring", self.show_recurring),
-        ]
-        self.nav_btns = {}
-        for text, view, cmd in nav_buttons:
-            btn = ctk.CTkButton(self.sidebar, text=text, command=cmd, fg_color="transparent",
-                                 text_color=self.text_muted, hover_color=self.card_bg_light,
-                                 anchor="w", corner_radius=8, height=40, font=("Segoe UI", 13))
-            btn.pack(fill="x", padx=15, pady=5)
-            self.nav_btns[view] = btn
-
-        # Theme toggle + footer
-        bottom_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        bottom_frame.pack(side="bottom", pady=20, fill="x", padx=15)
-
-        theme_label = "\u2600\ufe0f Light Mode" if self.theme_name == "dark" else "\U0001F319 Dark Mode"
-        self.theme_btn = ctk.CTkButton(bottom_frame, text=theme_label, command=self.toggle_theme,
-                                        fg_color="transparent", text_color=self.text_muted,
-                                        hover_color=self.card_bg_light, border_width=1, border_color=self.border,
-                                        corner_radius=8, height=36, font=("Segoe UI", 12))
-        self.theme_btn.pack(fill="x", pady=(0, 12))
-
-        ctk.CTkLabel(bottom_frame, text="(c) 2025 Tribby", font=("Segoe UI", 10), text_color=self.text_muted).pack()
-
-        # Content area
-        self.content_frame = ctk.CTkFrame(self, fg_color=self.bg, corner_radius=0)
-        self.content_frame.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
-
-        self.show_dashboard()
-
-    def toggle_theme(self):
-        self.theme_name = "light" if self.theme_name == "dark" else "dark"
-        self.data.settings["theme"] = self.theme_name
-        self.data.save_settings()
-        ctk.set_appearance_mode(THEMES[self.theme_name]["mode"])
-        self.apply_theme_palette()
-        self.rebuild_ui()
-
-    def rebuild_ui(self):
-        for w in self.winfo_children():
-            w.destroy()
-        self.setup_ui()
-        self.refresh_all()
-
-    def set_active_nav(self, active):
-        for view, btn in self.nav_btns.items():
-            if view == active:
-                btn.configure(fg_color=self.card_bg_light, text_color=self.cyan)
-            else:
-                btn.configure(fg_color="transparent", text_color=self.text_muted)
-
-    def clear_content(self):
-        for w in self.content_frame.winfo_children():
-            w.destroy()
-
-    # ------------------------------------------------------------
-    # DASHBOARD VIEW
-    # ------------------------------------------------------------
-    def show_dashboard(self):
-        self.current_view = "dashboard"
-        self.set_active_nav("dashboard")
-        self.clear_content()
-
-        scroll = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
-        self.dashboard_scroll = scroll
-
-        # Header
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        ctk.CTkLabel(header, text="Financial Dashboard", font=("Segoe UI", 26, "bold"), text_color=self.text).pack(anchor="w")
-        ctk.CTkLabel(header, text="Your money at a glance", font=("Segoe UI", 13), text_color=self.text_muted).pack(anchor="w")
-
-        # Stats row
-        stats_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        stats_frame.pack(fill="x", pady=10)
-
-        self.stat_vars = {
-            "balance": ctk.StringVar(value="\u20b10"),
-            "income": ctk.StringVar(value="\u20b10"),
-            "expenses": ctk.StringVar(value="\u20b10"),
-            "budget_usage": ctk.StringVar(value="0%")
-        }
-        stats = [
-            ("\U0001F4B0 Balance", "balance", self.cyan),
-            ("\U0001F4C8 Income", "income", self.success),
-            ("\U0001F4C9 Expenses", "expenses", self.danger),
-            ("\U0001F3AF Budget Used", "budget_usage", self.warning)
-        ]
-        for i, (label, key, color) in enumerate(stats):
-            card = ctk.CTkFrame(stats_frame, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-            card.grid(row=0, column=i, padx=10, sticky="nsew")
-            stats_frame.grid_columnconfigure(i, weight=1)
-            ctk.CTkLabel(card, text=label, font=("Segoe UI", 13), text_color=self.text_muted).pack(pady=(12, 5))
-            ctk.CTkLabel(card, textvariable=self.stat_vars[key], font=("Segoe UI", 28, "bold"), text_color=color).pack(pady=(0, 12))
-
-        # Charts row: trends + category breakdown
-        charts_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        charts_row.pack(fill="x", pady=10)
-        charts_row.grid_columnconfigure(0, weight=2)
-        charts_row.grid_columnconfigure(1, weight=1)
-
-        trend_card = ctk.CTkFrame(charts_row, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        trend_card.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
-        ctk.CTkLabel(trend_card, text="Monthly Trends", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 2))
-        ctk.CTkLabel(trend_card, text="Income vs Expenses over time", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-        self.chart_frame = ctk.CTkFrame(trend_card, fg_color=self.card_bg_light)
-        self.chart_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
-        self.chart_frame.configure(height=260)
-        self.chart_frame.pack_propagate(False)
-
-        cat_card = ctk.CTkFrame(charts_row, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        cat_card.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
-        ctk.CTkLabel(cat_card, text="Spending by Category", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 2))
-        ctk.CTkLabel(cat_card, text="This month's expenses", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-        self.category_chart_frame = ctk.CTkFrame(cat_card, fg_color=self.card_bg_light)
-        self.category_chart_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
-        self.category_chart_frame.configure(height=260)
-        self.category_chart_frame.pack_propagate(False)
-
-        # Net worth trend (full width)
-        net_card = ctk.CTkFrame(scroll, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        net_card.pack(fill="x", pady=10)
-        ctk.CTkLabel(net_card, text="Net Worth Over Time", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 2))
-        ctk.CTkLabel(net_card, text="Cumulative balance from all transactions", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-        self.networth_chart_frame = ctk.CTkFrame(net_card, fg_color=self.card_bg_light)
-        self.networth_chart_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
-        self.networth_chart_frame.configure(height=220)
-        self.networth_chart_frame.pack_propagate(False)
-
-        # Budget alerts + quick stats
-        info_card = ctk.CTkFrame(scroll, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        info_card.pack(fill="x", pady=10)
-        self.info_label = ctk.CTkLabel(info_card, text="", font=("Segoe UI", 13), text_color=self.text_muted, justify="left")
-        self.info_label.pack(pady=18, padx=20, anchor="w")
-
-        self.alerts_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        self.alerts_frame.pack(fill="x", pady=(0, 10))
-
-        self.update_dashboard()
-
-    # ------------------------------------------------------------
-    # TRANSACTIONS VIEW
-    # ------------------------------------------------------------
-    def show_transactions(self):
-        self.current_view = "transactions"
-        self.set_active_nav("transactions")
-        self.clear_content()
-        self.editing_txn_id = None
-
-        # Header
-        header = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 15))
-        ctk.CTkLabel(header, text="Transaction Management", font=("Segoe UI", 26, "bold"), text_color=self.text).pack(anchor="w")
-        ctk.CTkLabel(header, text="Add, edit, and track your transactions", font=("Segoe UI", 13), text_color=self.text_muted).pack(anchor="w")
-
-        # Add/Edit transaction card
-        self.add_card = ctk.CTkFrame(self.content_frame, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        self.add_card.pack(fill="x", pady=10)
-        self.add_card_title = ctk.CTkLabel(self.add_card, text="Add New Transaction", font=("Segoe UI", 14, "bold"), text_color=self.cyan)
-        self.add_card_title.pack(anchor="w", padx=20, pady=(10, 5))
-
-        form = ctk.CTkFrame(self.add_card, fg_color="transparent")
-        form.pack(pady=8, padx=20, fill="x")
-
-        ctk.CTkLabel(form, text="Description:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.desc_entry = ctk.CTkEntry(form, width=280, placeholder_text="e.g., Coffee, Salary")
-        self.desc_entry.grid(row=0, column=1, padx=5, pady=5)
-
-        ctk.CTkLabel(form, text="Amount:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=0, column=2, padx=5, pady=5, sticky="e")
-        self.amount_entry = ctk.CTkEntry(form, width=120, placeholder_text="0.00")
-        self.amount_entry.grid(row=0, column=3, padx=5, pady=5)
-
-        self.trans_type = ctk.StringVar(value="expense")
-        ctk.CTkRadioButton(form, text="Income", variable=self.trans_type, value="income", text_color=self.success).grid(row=0, column=4, padx=8)
-        ctk.CTkRadioButton(form, text="Expense", variable=self.trans_type, value="expense", text_color=self.danger).grid(row=0, column=5, padx=8)
-
-        ctk.CTkLabel(form, text="Category:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=0, column=6, padx=5, pady=5, sticky="e")
-        self.cat_entry = ctk.CTkComboBox(form, width=160, values=self.data.all_categories())
-        self.cat_entry.set("")
-        self.cat_entry.grid(row=0, column=7, padx=5, pady=5)
-
-        btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.grid(row=1, column=0, columnspan=8, pady=10)
-        self.add_btn = ctk.CTkButton(btn_row, text="\u2795 Add Transaction", command=self.add_transaction,
-                                      fg_color=self.cyan, text_color="#000000", font=("Segoe UI", 11, "bold"), height=32, width=180)
-        self.add_btn.pack(side="left", padx=5)
-        self.cancel_edit_btn = ctk.CTkButton(btn_row, text="Cancel", command=self.cancel_edit,
-                                              fg_color="#2A2D37", hover_color="#3A3D47", height=32, width=100)
-        # hidden until editing
-
-        # Transaction list card
-        list_card = ctk.CTkFrame(self.content_frame, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        list_card.pack(fill="both", expand=True, pady=(10, 20))
-        ctk.CTkLabel(list_card, text="Transaction History", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 5))
-
-        # Summary bar
-        self.summary_frame = ctk.CTkFrame(list_card, fg_color=self.card_bg, corner_radius=12, border_width=1, border_color=self.border)
-        self.summary_frame.pack(fill="x", padx=20, pady=(5, 10))
-        self.summary_label = ctk.CTkLabel(self.summary_frame, text="", font=("Segoe UI", 13, "bold"), text_color=self.text)
-        self.summary_label.pack(pady=8)
-
-        # Controls: search, filters, sort
-        control_frame = ctk.CTkFrame(list_card, fg_color="transparent")
-        control_frame.pack(fill="x", padx=20, pady=(0, 10))
-
-        ctk.CTkLabel(control_frame, text="Search:", font=("Segoe UI", 11), text_color=self.text_muted).pack(side="left", padx=(0, 5))
-        search_entry = ctk.CTkEntry(control_frame, width=180, placeholder_text="Description...", textvariable=self.search_var)
-        search_entry.pack(side="left", padx=(0, 15))
-        self.search_var.trace_add("write", lambda *a: self.refresh_transactions())
-
-        ctk.CTkLabel(control_frame, text="Category:", font=("Segoe UI", 11), text_color=self.text_muted).pack(side="left", padx=(0, 5))
-        cat_options = ["All"] + self.data.all_categories()
-        cat_filter = ctk.CTkComboBox(control_frame, width=140, values=cat_options, variable=self.category_filter_var,
-                                      command=lambda v: self.refresh_transactions())
-        cat_filter.pack(side="left", padx=(0, 15))
-
-        ctk.CTkLabel(control_frame, text="Sort:", font=("Segoe UI", 11), text_color=self.text_muted).pack(side="left", padx=(0, 5))
-        sort_options = ["Date (newest)", "Date (oldest)", "Amount (high-low)", "Amount (low-high)", "Category"]
-        sort_combo = ctk.CTkComboBox(control_frame, width=160, values=sort_options, variable=self.sort_var,
-                                      command=lambda v: self.refresh_transactions())
-        sort_combo.pack(side="left", padx=(0, 15))
-
-        export_btn = ctk.CTkButton(control_frame, text="\U0001F4E5 Export CSV", command=self.export_csv, fg_color="#2A2D37", hover_color="#3A3D47", width=110)
-        export_btn.pack(side="right", padx=5)
-        clear_btn = ctk.CTkButton(control_frame, text="\U0001F5D1\ufe0f Clear All", command=self.clear_all_transactions, fg_color="#4A1A2A", hover_color="#6A2A3A", text_color=self.danger, width=100)
-        clear_btn.pack(side="right", padx=5)
-
-        # Income/Expense filter
-        filter_frame = ctk.CTkFrame(list_card, fg_color="transparent")
-        filter_frame.pack(fill="x", padx=20, pady=(0, 10))
-        ctk.CTkLabel(filter_frame, text="Show:", font=("Segoe UI", 11), text_color=self.text_muted).pack(side="left")
-        for f, label in [("all", "All"), ("income", "Income"), ("expense", "Expense")]:
-            rb = ctk.CTkRadioButton(filter_frame, text=label, variable=self.filter_var, value=f, command=self.refresh_transactions)
-            rb.pack(side="left", padx=12)
-
-        # Column headers
-        col_header = ctk.CTkFrame(list_card, fg_color="transparent")
-        col_header.pack(fill="x", padx=20, pady=(5, 0))
-        for txt, w in [("Date", 100), ("Description", 280), ("Category", 150), ("Amount", 140), ("", 110)]:
-            ctk.CTkLabel(col_header, text=txt, font=("Segoe UI", 11, "bold"), text_color=self.text_muted, width=w, anchor="w").pack(side="left", padx=5)
-
-        # Scrollable transaction rows
-        self.txn_scroll = ctk.CTkScrollableFrame(list_card, fg_color=self.card_bg, corner_radius=12)
-        self.txn_scroll.pack(fill="both", expand=True, padx=20, pady=(5, 15))
-
-        self.refresh_transactions()
-
-    def get_filtered_sorted_transactions(self):
-        filter_val = self.filter_var.get()
-        cat_val = self.category_filter_var.get()
-        search_val = self.search_var.get().strip().lower()
-
-        filtered = []
-        for t in self.data.transactions:
-            if filter_val == "income" and t["amount"] <= 0:
-                continue
-            if filter_val == "expense" and t["amount"] >= 0:
-                continue
-            if cat_val != "All" and t.get("category") != cat_val:
-                continue
-            if search_val and search_val not in t["description"].lower():
-                continue
-            filtered.append(t)
-
-        sort_val = self.sort_var.get()
-        if sort_val == "Date (newest)":
-            filtered.sort(key=lambda x: x["id"], reverse=True)
-        elif sort_val == "Date (oldest)":
-            filtered.sort(key=lambda x: x["id"])
-        elif sort_val == "Amount (high-low)":
-            filtered.sort(key=lambda x: x["amount"], reverse=True)
-        elif sort_val == "Amount (low-high)":
-            filtered.sort(key=lambda x: x["amount"])
-        elif sort_val == "Category":
-            filtered.sort(key=lambda x: (x.get("category") or "").lower())
-        return filtered
-
-    def refresh_transactions(self):
-        if not hasattr(self, "txn_scroll"):
-            return
-        filtered = self.get_filtered_sorted_transactions()
-
-        total_income = sum(t["amount"] for t in filtered if t["amount"] > 0)
-        total_expense = abs(sum(t["amount"] for t in filtered if t["amount"] < 0))
-        net = total_income - total_expense
-        self.summary_label.configure(
-            text=f"\U0001F4CA {len(filtered)} transactions  |  \U0001F4C8 Income: \u20b1{total_income:,.2f}  |  \U0001F4C9 Expenses: \u20b1{total_expense:,.2f}  |  \U0001F4B0 Net: \u20b1{net:,.2f}"
-        )
-
-        for w in self.txn_scroll.winfo_children():
-            w.destroy()
-
-        if not filtered:
-            ctk.CTkLabel(self.txn_scroll, text="No transactions match your filters.", font=("Segoe UI", 13), text_color=self.text_muted).pack(pady=30)
-            return
-
-        for i, t in enumerate(filtered[:200]):
-            row_color = self.card_bg if i % 2 == 0 else self.row_alt
-            row = ctk.CTkFrame(self.txn_scroll, fg_color=row_color, corner_radius=8)
-            row.pack(fill="x", pady=2)
-
-            date_str = datetime.fromisoformat(t["date"]).strftime("%Y-%m-%d")
-            ctk.CTkLabel(row, text=date_str, font=("Segoe UI", 11), text_color=self.text_muted, width=100, anchor="w").pack(side="left", padx=5, pady=8)
-            ctk.CTkLabel(row, text=t["description"], font=("Segoe UI", 12), text_color=self.text, width=280, anchor="w").pack(side="left", padx=5)
-
-            cat = t.get("category", "")
-            cat_badge = ctk.CTkLabel(row, text=cat, font=("Segoe UI", 10, "bold"), text_color="#000000",
-                                      fg_color=self.category_color(cat), corner_radius=8, width=110, height=22)
-            cat_badge_holder = ctk.CTkFrame(row, fg_color="transparent", width=150)
-            cat_badge_holder.pack(side="left", padx=5)
-            cat_badge.pack(in_=cat_badge_holder, anchor="w")
-
-            sign = "+" if t["amount"] > 0 else "-"
-            amount_color = self.success if t["amount"] > 0 else self.danger
-            ctk.CTkLabel(row, text=f"{sign}\u20b1{abs(t['amount']):,.2f}", font=("Segoe UI", 12, "bold"),
-                         text_color=amount_color, width=140, anchor="w").pack(side="left", padx=5)
-
-            action_frame = ctk.CTkFrame(row, fg_color="transparent", width=110)
-            action_frame.pack(side="left", padx=5)
-            edit_btn = ctk.CTkButton(action_frame, text="\u270F\ufe0f", width=32, height=28, fg_color="transparent",
-                                      text_color=self.cyan, hover_color=self.card_bg_light,
-                                      command=lambda tid=t["id"]: self.start_edit_transaction(tid))
-            edit_btn.pack(side="left", padx=2)
-            del_btn = ctk.CTkButton(action_frame, text="\U0001F5D1\ufe0f", width=32, height=28, fg_color="transparent",
-                                     text_color=self.danger, hover_color="#4A1A2A",
-                                     command=lambda tid=t["id"]: self.delete_transaction_by_id(tid))
-            del_btn.pack(side="left", padx=2)
-
-        if len(filtered) > 200:
-            ctk.CTkLabel(self.txn_scroll, text=f"Showing first 200 of {len(filtered)} transactions.",
-                         font=("Segoe UI", 11), text_color=self.text_muted).pack(pady=10)
-
-    def delete_transaction_by_id(self, txn_id):
-        txn = next((t for t in self.data.transactions if t["id"] == txn_id), None)
-        if not txn:
-            return
-        if messagebox.askyesno("Delete", f"Delete '{txn['description']}'?"):
-            self.data.delete_transaction(txn_id)
-            if self.editing_txn_id == txn_id:
-                self.cancel_edit()
-            self.refresh_all()
-
-    def start_edit_transaction(self, txn_id):
-        txn = next((t for t in self.data.transactions if t["id"] == txn_id), None)
-        if not txn:
-            return
-        self.editing_txn_id = txn_id
-        self.desc_entry.delete(0, "end")
-        self.desc_entry.insert(0, txn["description"])
-        self.amount_entry.delete(0, "end")
-        self.amount_entry.insert(0, f"{abs(txn['amount'])}")
-        self.trans_type.set("income" if txn["amount"] > 0 else "expense")
-        self.cat_entry.set(txn.get("category", ""))
-
-        self.add_card_title.configure(text="Edit Transaction")
-        self.add_btn.configure(text="\U0001F4BE Save Changes")
-        self.cancel_edit_btn.pack(side="left", padx=5)
-
-    def cancel_edit(self):
-        self.editing_txn_id = None
-        self.desc_entry.delete(0, "end")
-        self.amount_entry.delete(0, "end")
-        self.cat_entry.set("")
-        self.trans_type.set("expense")
-        self.add_card_title.configure(text="Add New Transaction")
-        self.add_btn.configure(text="\u2795 Add Transaction")
-        self.cancel_edit_btn.pack_forget()
-
-    def clear_all_transactions(self):
-        if messagebox.askyesno("Clear All", "Delete ALL transactions? Cannot be undone."):
-            self.data.clear_transactions()
-            self.refresh_all()
-
-    def export_csv(self):
-        if not self.data.transactions:
-            messagebox.showinfo("Export", "No transactions to export.")
-            return
-        filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
-        if filepath:
-            with open(filepath, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Date", "Description", "Category", "Amount", "Type"])
-                for t in self.data.transactions:
-                    date = datetime.fromisoformat(t["date"]).strftime("%Y-%m-%d")
-                    typ = "Income" if t["amount"] > 0 else "Expense"
-                    writer.writerow([date, t["description"], t["category"], abs(t["amount"]), typ])
-            messagebox.showinfo("Export", f"Exported to {filepath}")
-
-    # ---------- Add / Edit transaction submit ----------
-    def add_transaction(self):
-        desc = self.desc_entry.get().strip()
-        amt_str = self.amount_entry.get().strip()
-        cat = self.cat_entry.get().strip()
-        if not desc or not amt_str or not cat:
-            messagebox.showerror("Missing info", "Please fill all fields.")
-            return
-        try:
-            amt = float(amt_str)
-        except ValueError:
-            messagebox.showerror("Invalid amount", "Amount must be a number.")
-            return
-        if amt <= 0:
-            messagebox.showerror("Invalid amount", "Amount must be greater than zero.")
-            return
-        if self.trans_type.get() == "expense":
-            amt = -abs(amt)
-        else:
-            amt = abs(amt)
-
-        if self.editing_txn_id is not None:
-            self.data.update_transaction(self.editing_txn_id, desc, amt, cat)
-            self.cancel_edit()
-            messagebox.showinfo("Success", "Transaction updated.")
-        else:
-            self.data.add_transaction(desc, amt, cat)
-            self.desc_entry.delete(0, "end")
-            self.amount_entry.delete(0, "end")
-            self.cat_entry.set("")
-            messagebox.showinfo("Success", "Transaction added.")
-
-        self.refresh_all()
-        if self.current_view == "transactions":
-            self.show_transactions()
-
-    # ------------------------------------------------------------
-    # BUDGET & GOALS VIEW
-    # ------------------------------------------------------------
-    def show_budget_goals(self):
-        self.current_view = "budget"
-        self.set_active_nav("budget")
-        self.clear_content()
-
-        scroll = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
-
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        ctk.CTkLabel(header, text="Budget & Goals", font=("Segoe UI", 26, "bold"), text_color=self.text).pack(anchor="w")
-        ctk.CTkLabel(header, text="Plan your spending and track savings", font=("Segoe UI", 13), text_color=self.text_muted).pack(anchor="w")
-
-        # Two columns
-        columns = ctk.CTkFrame(scroll, fg_color="transparent")
-        columns.pack(fill="both", expand=True, pady=10)
-        columns.grid_columnconfigure(0, weight=1)
-        columns.grid_columnconfigure(1, weight=1)
-
-        # LEFT: Overall Budget
-        left = ctk.CTkFrame(columns, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        left.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
-        ctk.CTkLabel(left, text="Monthly Budget", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 5))
-        ctk.CTkLabel(left, text="Set your overall spending limit", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-
-        self.budget_display = ctk.CTkLabel(left, text=f"\u20b1{self.data.budget:,.2f}", font=("Segoe UI", 24, "bold"), text_color=self.text)
-        self.budget_display.pack(pady=5)
-
-        quick_frame = ctk.CTkFrame(left, fg_color="transparent")
-        quick_frame.pack(pady=8)
-        for amt in [10000, 20000, 30000, 50000]:
-            btn = ctk.CTkButton(quick_frame, text=f"\u20b1{amt:,}", command=lambda a=amt: self.set_budget(a), fg_color="#2A2D37", width=90, height=32)
-            btn.pack(side="left", padx=5)
-
-        slider_frame = ctk.CTkFrame(left, fg_color="transparent")
-        slider_frame.pack(fill="x", padx=20, pady=15)
-        self.budget_slider = ctk.CTkSlider(slider_frame, from_=5000, to=150000, number_of_steps=145, command=self.set_budget_slider)
-        self.budget_slider.pack(fill="x")
-        self.budget_slider.set(self.data.budget)
-
-        self.budget_progress = ctk.CTkProgressBar(left, height=12, corner_radius=6)
-        self.budget_progress.pack(pady=12, padx=20, fill="x")
-        self.budget_progress.set(0)
-
-        self.budget_stats = ctk.CTkLabel(left, text="", font=("Segoe UI", 11), text_color=self.text_muted)
-        self.budget_stats.pack(pady=(0, 10))
-
-        # Category budgets section
-        ctk.CTkLabel(left, text="Category Budgets", font=("Segoe UI", 13, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(10, 5))
-        ctk.CTkLabel(left, text="Set spending limits per category", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-
-        cat_form = ctk.CTkFrame(left, fg_color="transparent")
-        cat_form.pack(fill="x", padx=20, pady=(0, 10))
-        self.cat_budget_combo = ctk.CTkComboBox(cat_form, width=140, values=self.data.all_categories())
-        self.cat_budget_combo.pack(side="left", padx=(0, 8))
-        self.cat_budget_entry = ctk.CTkEntry(cat_form, width=110, placeholder_text="Amount")
-        self.cat_budget_entry.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(cat_form, text="Set", width=60, height=28, fg_color=self.purple,
-                       command=self.set_category_budget_from_form).pack(side="left")
-
-        self.cat_budgets_container = ctk.CTkFrame(left, fg_color="transparent")
-        self.cat_budgets_container.pack(fill="x", padx=20, pady=(0, 20))
-
-        # RIGHT: Savings Goals
-        right = ctk.CTkFrame(columns, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        right.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
-        ctk.CTkLabel(right, text="Savings Goals", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 5))
-        ctk.CTkLabel(right, text="Track your progress", font=("Segoe UI", 11), text_color=self.text_muted).pack(anchor="w", padx=20, pady=(0, 8))
-
-        add_goal_frame = ctk.CTkFrame(right, fg_color="transparent")
-        add_goal_frame.pack(fill="x", padx=20, pady=(5, 15))
-        self.goal_name_entry = ctk.CTkEntry(add_goal_frame, width=200, placeholder_text="Goal name")
-        self.goal_name_entry.pack(side="left", padx=5)
-        self.goal_target_entry = ctk.CTkEntry(add_goal_frame, width=120, placeholder_text="Target amount")
-        self.goal_target_entry.pack(side="left", padx=5)
-        ctk.CTkButton(add_goal_frame, text="\u2795 Create Goal", command=self.add_goal, fg_color=self.purple,
-                       text_color="#FFFFFF", font=("Segoe UI", 11)).pack(side="left", padx=10)
-
-        self.goals_scroll = ctk.CTkScrollableFrame(right, fg_color="transparent", height=400)
-        self.goals_scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self.goals_container = self.goals_scroll
-
-        self.update_budget_ui()
-        self.refresh_category_budgets()
-        self.refresh_goals()
-
-    def set_budget_slider(self, value):
-        self.set_budget(int(value))
-
-    def set_category_budget_from_form(self):
-        cat = self.cat_budget_combo.get().strip()
-        amt_str = self.cat_budget_entry.get().strip()
-        if not cat:
-            messagebox.showerror("Error", "Choose a category.")
-            return
-        try:
-            amt = float(amt_str) if amt_str else 0
-        except ValueError:
-            messagebox.showerror("Error", "Invalid amount.")
-            return
-        if amt <= 0:
-            messagebox.showerror("Error", "Enter an amount greater than zero.")
-            return
-        self.data.set_category_budget(cat, amt)
-        self.cat_budget_entry.delete(0, "end")
-        self.refresh_category_budgets()
-        if self.current_view == "dashboard":
-            self.update_dashboard()
-
-    def refresh_category_budgets(self):
-        if not hasattr(self, "cat_budgets_container"):
-            return
-        for w in self.cat_budgets_container.winfo_children():
-            w.destroy()
-
-        if not self.data.category_budgets:
-            ctk.CTkLabel(self.cat_budgets_container, text="No category budgets set yet.",
-                          font=("Segoe UI", 11), text_color=self.text_muted).pack(pady=10)
-            return
-
-        spent_by_cat = self.spending_by_category_this_month()
-        for cat, limit in self.data.category_budgets.items():
-            spent = spent_by_cat.get(cat, 0)
-            usage = min(spent / limit, 1.0) if limit > 0 else 0
-
-            row = ctk.CTkFrame(self.cat_budgets_container, fg_color=self.card_bg, corner_radius=10, border_width=1, border_color=self.border)
-            row.pack(fill="x", pady=4)
-
-            top = ctk.CTkFrame(row, fg_color="transparent")
-            top.pack(fill="x", padx=12, pady=(8, 0))
-            badge = ctk.CTkLabel(top, text=cat, font=("Segoe UI", 11, "bold"), text_color="#000000",
-                                  fg_color=self.category_color(cat), corner_radius=8, width=100, height=22)
-            badge.pack(side="left")
-            ctk.CTkLabel(top, text=f"\u20b1{spent:,.0f} / \u20b1{limit:,.0f}", font=("Segoe UI", 11), text_color=self.text_muted).pack(side="left", padx=10)
-
-            del_btn = ctk.CTkButton(top, text="\u2716", width=26, height=26, fg_color="transparent",
-                                     text_color=self.danger, hover_color="#4A1A2A",
-                                     command=lambda c=cat: self.delete_category_budget(c))
-            del_btn.pack(side="right")
-
-            bar_color = self.danger if usage >= 1.0 else (self.warning if usage >= 0.8 else self.success)
-            prog = ctk.CTkProgressBar(row, height=8, corner_radius=4, progress_color=bar_color)
-            prog.pack(fill="x", padx=12, pady=(5, 10))
-            prog.set(usage)
-
-    def delete_category_budget(self, category):
-        self.data.set_category_budget(category, 0)
-        self.refresh_category_budgets()
-        if self.current_view == "dashboard":
-            self.update_dashboard()
+            nd = datetime.fromisoformat(r["next_date"]); guard = 0
+            while nd <= now and guard < 500:
+                self.add_transaction(r["description"], r["amount"], r["category"], date=nd)
+                nd = self._advance(nd, r["interval"]); changed = True; guard += 1
+            r["next_date"] = nd.isoformat()
+        if changed: self.save_recurring()
+
+    # ── Aggregations ──────────────────────────────────────────────────────────
+    def total_income(self):   return sum(t["amount"] for t in self.transactions if t["amount"] > 0)
+    def total_expenses(self): return abs(sum(t["amount"] for t in self.transactions if t["amount"] < 0))
+    def balance(self):        return self.total_income() - self.total_expenses()
 
     def spending_by_category_this_month(self):
-        now = datetime.now()
-        totals = {}
-        for t in self.data.transactions:
-            if t["amount"] >= 0:
-                continue
+        now = datetime.now(); totals = {}
+        for t in self.transactions:
+            if t["amount"] >= 0: continue
             d = datetime.fromisoformat(t["date"])
             if d.year == now.year and d.month == now.month:
                 cat = t.get("category", "Other")
                 totals[cat] = totals.get(cat, 0) + abs(t["amount"])
         return totals
 
-    # ------------------------------------------------------------
-    # RECURRING VIEW
-    # ------------------------------------------------------------
+    def monthly_totals(self, months=6):
+        monthly = {}
+        for t in self.transactions:
+            d = datetime.fromisoformat(t["date"])
+            k = d.strftime("%b '%y")
+            if k not in monthly: monthly[k] = {"income": 0, "expense": 0, "sort": d.year * 12 + d.month}
+            if t["amount"] > 0: monthly[k]["income"] += t["amount"]
+            else:               monthly[k]["expense"] += abs(t["amount"])
+        keys = sorted(monthly, key=lambda k: monthly[k]["sort"])[-months:]
+        return [(k, monthly[k]["income"], monthly[k]["expense"]) for k in keys]
+
+    def net_worth_series(self, max_pts=80):
+        sorted_t = sorted(self.transactions, key=lambda x: x["id"])
+        pts = []; running = 0
+        for t in sorted_t:
+            running += t["amount"]
+            pts.append((datetime.fromisoformat(t["date"]), running))
+        return pts[-max_pts:] if len(pts) > max_pts else pts
+
+    def import_csv(self, filepath):
+        added = skipped = 0
+        try:
+            with open(filepath, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        desc  = row.get("Description", "").strip()
+                        cat   = row.get("Category", "Other").strip()
+                        amt   = float(row.get("Amount", 0))
+                        typ   = row.get("Type", "Expense").strip().lower()
+                        date_str = row.get("Date", "").strip()
+                        date  = datetime.strptime(date_str, "%Y-%m-%d") if date_str else datetime.now()
+                        if not desc or amt == 0: skipped += 1; continue
+                        signed = abs(amt) if typ == "income" else -abs(amt)
+                        self.add_transaction(desc, signed, cat, date=date)
+                        added += 1
+                    except Exception:
+                        skipped += 1
+        except Exception:
+            return 0, 0
+        return added, skipped
+
+    # ── User settings ────────────────────────────────────────────────────────
+    def get_user_name(self):
+        return self.settings.get("user_name", "Friend")
+
+    def set_user_name(self, name):
+        self.settings["user_name"] = name
+        self.save_settings()
+
+# ── Main Application ──────────────────────────────────────────────────────────
+
+class TribbyApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Tribby — Your Personal Financial Assistant")
+        self.geometry("1560x960")
+        self.minsize(1200, 720)
+
+        self.data = DataManager()
+        self.current_view = "dashboard"
+        self.editing_txn_id = None
+        self.theme_name = self.data.settings.get("theme", "dark")
+        self._apply_palette()
+        ctk.set_appearance_mode(THEMES[self.theme_name]["mode"])
+        ctk.set_default_color_theme("blue")
+
+        # Check if first launch – ask for name
+        if "user_name" not in self.data.settings:
+            self.after(500, self._ask_name)
+
+        # ── Keyboard shortcuts ──────────────────────────────────────────────
+        self.bind_all("<Control-n>", lambda e: self._quick_add_window())
+        self.bind_all("<Control-f>", lambda e: self._focus_search())
+        self.bind_all("<Control-s>", lambda e: self._submit_transaction())
+        self.bind_all("<Escape>", lambda e: self._cancel_edit())
+
+        # ── UI ──────────────────────────────────────────────────────────────
+        self._build_ui()
+        self._init_tray()
+        self.refresh_all()
+        self.after(5000, self._check_notifications)
+
+    # ── First launch: ask for name ────────────────────────────────────────────
+    def _ask_name(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Welcome to Tribby!")
+        dialog.geometry("400x200")
+        dialog.attributes("-topmost", True)
+        dialog.transient(self)
+        dialog.grab_set()
+        ctk.CTkLabel(dialog, text="What should I call you?", font=(FONT_FAMILY, 16, "bold")).pack(pady=20)
+        entry = ctk.CTkEntry(dialog, placeholder_text="Your name", width=250)
+        entry.pack(pady=10)
+        def set_name():
+            name = entry.get().strip()
+            if name:
+                self.data.set_user_name(name)
+                self._update_greeting()
+                dialog.destroy()
+        ctk.CTkButton(dialog, text="Let's go!", command=set_name, fg_color=self.cyan,
+                      text_color="#000000").pack(pady=10)
+        entry.focus()
+
+    def _update_greeting(self):
+        if hasattr(self, "greeting_lbl"):
+            name = self.data.get_user_name()
+            self.greeting_lbl.configure(text=f"👋 Hello, {name}!")
+
+    # ── Palette ───────────────────────────────────────────────────────────────
+    def _apply_palette(self):
+        t = THEMES[self.theme_name]
+        self.bg         = t["bg"]
+        self.card       = t["card"]
+        self.card_light = t["card_light"]
+        self.sidebar_c  = t["sidebar"]
+        self.border     = t["border"]
+        self.text       = t["text"]
+        self.text_muted = t["text_muted"]
+        self.cyan       = t["cyan"]
+        self.purple     = t["purple"]
+        self.success    = t["success"]
+        self.danger     = t["danger"]
+        self.warning    = t["warning"]
+        self.row_alt    = t["row_alt"]
+        self.input_bg   = t["input_bg"]
+
+    def cat_color(self, category):
+        cats = self.data.all_categories()
+        idx = cats.index(category) if category in cats else hash(category)
+        return CATEGORY_COLORS[idx % len(CATEGORY_COLORS)]
+
+    def toggle_theme(self):
+        self.theme_name = "light" if self.theme_name == "dark" else "dark"
+        self.data.settings["theme"] = self.theme_name
+        self.data.save_settings()
+        ctk.set_appearance_mode(THEMES[self.theme_name]["mode"])
+        self._apply_palette()
+        for w in self.winfo_children(): w.destroy()
+        self._build_ui()
+        self.refresh_all()
+
+    # ── Tray ──────────────────────────────────────────────────────────────────
+    def _init_tray(self):
+        if not HAS_TRAY: return
+        try:
+            image = self._create_tray_icon()
+            menu = pystray.Menu(
+                pystray.MenuItem("Show Tribby", self._show_window),
+                pystray.MenuItem("Quick Add", self._quick_add_window),
+                pystray.MenuItem("Quit", self._quit_app)
+            )
+            self.tray_icon = pystray.Icon("tribby", image, "Tribby", menu)
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        except Exception:
+            pass
+
+    def _create_tray_icon(self):
+        size = 64
+        image = Image.new("RGB", (size, size), self.sidebar_c)
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((8, 8, size-8, size-8), fill=self.cyan)
+        draw.text((size//2-6, size//2-8), "₱", fill="#000000")
+        return image
+
+    def _show_window(self):
+        self.deiconify()
+        self.lift()
+
+    def _quit_app(self):
+        self.destroy()
+        if hasattr(self, "tray_icon"):
+            self.tray_icon.stop()
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+    def _check_notifications(self):
+        if not HAS_NOTIFY: return
+        try:
+            now = datetime.now()
+            for r in self.data.recurring:
+                nd = datetime.fromisoformat(r["next_date"])
+                days = (nd - now).days
+                if days == 3:
+                    notification.notify(
+                        title="💳 Upcoming Bill",
+                        message=f"{r['description']} due in 3 days (₱{abs(r['amount']):,.2f})",
+                        timeout=5
+                    )
+                elif days == 1:
+                    notification.notify(
+                        title="⏰ Bill Due Tomorrow",
+                        message=f"{r['description']} due tomorrow (₱{abs(r['amount']):,.2f})",
+                        timeout=5
+                    )
+            exp = self.data.total_expenses()
+            if self.data.budget > 0 and exp > self.data.budget * 0.9:
+                notification.notify(
+                    title="⚠️ Budget Alert",
+                    message=f"You've used {exp/self.data.budget*100:.0f}% of your monthly budget",
+                    timeout=5
+                )
+        except Exception:
+            pass
+        self.after(3600000, self._check_notifications)
+
+    # ── Shell ─────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.configure(fg_color=self.bg)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self._build_sidebar()
+        self.content = ctk.CTkFrame(self, fg_color=self.bg, corner_radius=0)
+        self.content.grid(row=0, column=1, sticky="nsew", padx=(0, 16), pady=16)
+        self._build_status_bar()
+        self.show_dashboard()
+
+    def _build_sidebar(self):
+        sb = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=self.sidebar_c)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
+        self.sidebar = sb
+
+        logo = ctk.CTkFrame(sb, fg_color="transparent")
+        logo.pack(pady=(28, 12))
+        ctk.CTkLabel(logo, text="💰", font=(FONT_FAMILY, 36)).pack()
+        ctk.CTkLabel(logo, text="TRIBBY", font=(FONT_FAMILY, 20, "bold"),
+                     text_color=self.cyan).pack()
+        ctk.CTkLabel(logo, text="your personal assistant", font=(FONT_FAMILY, 10),
+                     text_color=self.text_muted).pack()
+
+        # Greeting
+        self.greeting_lbl = ctk.CTkLabel(sb, text=f"👋 Hello, {self.data.get_user_name()}!",
+                                          font=(FONT_FAMILY, 12), text_color=self.cyan)
+        self.greeting_lbl.pack(pady=(4, 16))
+
+        ctk.CTkFrame(sb, height=1, fg_color=self.border).pack(fill="x", padx=20, pady=(0, 16))
+
+        nav_icons = ["▣", "☰", "◎", "↻"]
+        nav_views = ["dashboard", "transactions", "budget", "recurring"]
+        nav_labels = ["Dashboard", "Transactions", "Budget & Goals", "Recurring"]
+        nav_cmds = [self.show_dashboard, self.show_transactions,
+                    self.show_budget_goals, self.show_recurring]
+        self.nav_btns = {}
+        for label, view, cmd, icon in zip(nav_labels, nav_views, nav_cmds, nav_icons):
+            btn = ctk.CTkButton(
+                sb, text=f"  {icon}  {label}", command=cmd,
+                fg_color="transparent", text_color=self.text_muted,
+                hover_color=self.card_light, anchor="w",
+                corner_radius=10, height=42,
+                font=(FONT_FAMILY, 13),
+            )
+            btn.pack(fill="x", padx=12, pady=3)
+            self.nav_btns[view] = btn
+
+        bottom = ctk.CTkFrame(sb, fg_color="transparent")
+        bottom.pack(side="bottom", pady=20, fill="x", padx=14)
+        ctk.CTkFrame(bottom, height=1, fg_color=self.border).pack(fill="x", pady=(0, 14))
+
+        theme_icon = "☀" if self.theme_name == "dark" else "🌙"
+        theme_lbl  = "Light Mode" if self.theme_name == "dark" else "Dark Mode"
+        ctk.CTkButton(
+            bottom, text=f"{theme_icon}  {theme_lbl}", command=self.toggle_theme,
+            fg_color="transparent", text_color=self.text_muted,
+            hover_color=self.card_light, border_width=1, border_color=self.border,
+            corner_radius=10, height=38, font=(FONT_FAMILY, 12),
+        ).pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(bottom, text="© 2025 Tribby",
+                     font=(FONT_FAMILY, 10), text_color=self.text_muted).pack()
+
+    def _build_status_bar(self):
+        self.status_bar = ctk.CTkFrame(self, height=30, fg_color=self.border)
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.status_lbl = ctk.CTkLabel(self.status_bar, text="Ready", font=(FONT_FAMILY, 10))
+        self.status_lbl.pack(side="left", padx=12)
+        # Quick FAB‑style button on status bar (like a +)
+        self.fab_btn = ctk.CTkButton(self.status_bar, text="+", width=36, height=28,
+                                      command=self._quick_add_window,
+                                      fg_color=self.cyan, text_color="#000000",
+                                      corner_radius=30, font=(FONT_FAMILY, 16, "bold"))
+        self.fab_btn.pack(side="right", padx=12)
+
+    def _set_nav(self, active):
+        for view, btn in self.nav_btns.items():
+            if view == active:
+                btn.configure(fg_color=self.card_light, text_color=self.cyan)
+            else:
+                btn.configure(fg_color="transparent", text_color=self.text_muted)
+
+    def _clear_content(self):
+        for w in self.content.winfo_children():
+            if w != self.status_bar: w.destroy()
+
+    # ── View switching ────────────────────────────────────────────────────────
+    def _switch_view(self, new_view):
+        self.current_view = new_view
+        self._clear_content()
+        if new_view == "dashboard":
+            self.show_dashboard()
+        elif new_view == "transactions":
+            self.show_transactions()
+        elif new_view == "budget":
+            self.show_budget_goals()
+        elif new_view == "recurring":
+            self.show_recurring()
+        self._set_nav(new_view)
+
+    def _page_header(self, parent, title, subtitle):
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 16))
+        ctk.CTkLabel(hdr, text=title, font=(FONT_FAMILY, 26, "bold"),
+                     text_color=self.text).pack(anchor="w")
+        ctk.CTkLabel(hdr, text=subtitle, font=(FONT_FAMILY, 13),
+                     text_color=self.text_muted).pack(anchor="w")
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    def _quick_add_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Quick Add")
+        win.geometry("420x350")
+        win.attributes("-topmost", True)
+        win.focus()
+
+        ctk.CTkLabel(win, text="Quick Add Transaction", font=(FONT_FAMILY, 16, "bold")).pack(pady=12)
+
+        desc = ctk.CTkEntry(win, placeholder_text="Description", width=300)
+        desc.pack(pady=6)
+
+        amt = ctk.CTkEntry(win, placeholder_text="Amount", width=300)
+        amt.pack(pady=6)
+
+        cat = ctk.CTkComboBox(win, values=self.data.all_categories(), width=300)
+        cat.set("Food")
+        cat.pack(pady=6)
+
+        typ = ctk.StringVar(value="expense")
+        tf = ctk.CTkFrame(win, fg_color="transparent")
+        tf.pack(pady=6)
+        ctk.CTkRadioButton(tf, text="Expense", variable=typ, value="expense",
+                           fg_color=self.danger).pack(side="left", padx=10)
+        ctk.CTkRadioButton(tf, text="Income", variable=typ, value="income",
+                           fg_color=self.success).pack(side="left", padx=10)
+
+        def add():
+            d = desc.get().strip()
+            a = amt.get().strip()
+            c = cat.get().strip()
+            if not d or not a or not c:
+                messagebox.showerror("Error", "Fill all fields.")
+                return
+            try: am = float(a)
+            except: messagebox.showerror("Error", "Invalid amount"); return
+            if am <= 0: messagebox.showerror("Error", "Amount > 0"); return
+            signed = am if typ.get() == "income" else -am
+            self.data.add_transaction(d, signed, c)
+            self.refresh_all()
+            win.destroy()
+            self.status_lbl.configure(text=f"Added: {d}")
+
+        ctk.CTkButton(win, text="Add", command=add, fg_color=self.cyan,
+                      text_color="#000000").pack(pady=12)
+
+    def _focus_search(self):
+        if hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
+
+    # =========================================================================
+    # DASHBOARD
+    # =========================================================================
+    def show_dashboard(self):
+        self.current_view = "dashboard"
+        self._set_nav("dashboard")
+        self._clear_content()
+
+        scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+        self._dash_scroll = scroll
+
+        # Greeting + quote
+        head = ctk.CTkFrame(scroll, fg_color="transparent")
+        head.pack(fill="x", pady=(0, 12))
+        name = self.data.get_user_name()
+        ctk.CTkLabel(head, text=f"👋 Welcome back, {name}!", font=(FONT_FAMILY, 24, "bold"),
+                     text_color=self.text).pack(anchor="w")
+        quote = random.choice(QUOTES)
+        ctk.CTkLabel(head, text=f"💡 {quote}", font=(FONT_FAMILY, 13, "italic"),
+                     text_color=self.text_muted).pack(anchor="w")
+
+        # Hero stats
+        hero = ctk.CTkFrame(scroll, fg_color="transparent")
+        hero.pack(fill="x", pady=(0, 16))
+        self._stat_vars = {
+            "balance":      ctk.StringVar(value="₱0"),
+            "income":       ctk.StringVar(value="₱0"),
+            "expenses":     ctk.StringVar(value="₱0"),
+            "budget_usage": ctk.StringVar(value="0%"),
+        }
+        stat_meta = [
+            ("▣  Balance",     "balance",      self.cyan),
+            ("↑  Income",      "income",       self.success),
+            ("↓  Expenses",    "expenses",     self.danger),
+            ("◎  Budget Used", "budget_usage", self.warning),
+        ]
+        for i, (lbl, key, color) in enumerate(stat_meta):
+            hero.grid_columnconfigure(i, weight=1)
+            c = ctk.CTkFrame(hero, fg_color=self.card, corner_radius=18,
+                             border_width=1, border_color=self.border)
+            c.grid(row=0, column=i, padx=6, sticky="nsew")
+            ctk.CTkLabel(c, text=lbl, font=(FONT_FAMILY, 12),
+                         text_color=self.text_muted).pack(pady=(16, 4))
+            ctk.CTkLabel(c, textvariable=self._stat_vars[key],
+                         font=(FONT_FAMILY, 28, "bold"),
+                         text_color=color).pack(pady=(0, 16))
+
+        # Smart Insight card (personalized)
+        insight = ctk.CTkFrame(scroll, fg_color=self.card_light, corner_radius=18,
+                               border_width=1, border_color=self.border)
+        insight.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(insight, text="🧠 Smart Insight", font=(FONT_FAMILY, 14, "bold"),
+                     text_color=self.cyan).pack(anchor="w", padx=18, pady=(12, 4))
+        self.insight_lbl = ctk.CTkLabel(insight, text="Loading insights...",
+                                         font=(FONT_FAMILY, 12), text_color=self.text_muted,
+                                         wraplength=600, justify="left")
+        self.insight_lbl.pack(anchor="w", padx=18, pady=(0, 12))
+        self._update_insight()
+
+        # Charts
+        charts = ctk.CTkFrame(scroll, fg_color="transparent")
+        charts.pack(fill="x", pady=(0, 12))
+        charts.grid_columnconfigure(0, weight=3)
+        charts.grid_columnconfigure(1, weight=2)
+
+        flow_card = ctk.CTkFrame(charts, fg_color=self.card, corner_radius=18,
+                                 border_width=1, border_color=self.border)
+        flow_card.grid(row=0, column=0, padx=(0, 8), sticky="nsew")
+        card_title(flow_card, self, "Cash Flow", "Income vs Expenses · last 6 months", "▣")
+        self._flow_frame = ctk.CTkFrame(flow_card, fg_color=self.card, height=240)
+        self._flow_frame.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        self._flow_frame.pack_propagate(False)
+
+        donut_card = ctk.CTkFrame(charts, fg_color=self.card, corner_radius=18,
+                                  border_width=1, border_color=self.border)
+        donut_card.grid(row=0, column=1, padx=(8, 0), sticky="nsew")
+        card_title(donut_card, self, "Spending Breakdown", "This month by category", "◎")
+        self._donut_frame = ctk.CTkFrame(donut_card, fg_color=self.card, height=240)
+        self._donut_frame.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        self._donut_frame.pack_propagate(False)
+
+        nw_card = ctk.CTkFrame(scroll, fg_color=self.card, corner_radius=18,
+                               border_width=1, border_color=self.border)
+        nw_card.pack(fill="x", pady=(0, 12))
+        card_title(nw_card, self, "Net Worth Over Time", "Cumulative balance trend", "↑")
+        self._nw_frame = ctk.CTkFrame(nw_card, fg_color=self.card, height=200)
+        self._nw_frame.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        self._nw_frame.pack_propagate(False)
+
+        self._alerts_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        self._alerts_frame.pack(fill="x", pady=(0, 4))
+
+        self._info_card = ctk.CTkFrame(scroll, fg_color=self.card_light, corner_radius=14,
+                                       border_width=1, border_color=self.border)
+        self._info_card.pack(fill="x", pady=(0, 16))
+        self._info_lbl = ctk.CTkLabel(self._info_card, text="", font=(FONT_FAMILY, 12),
+                                       text_color=self.text_muted)
+        self._info_lbl.pack(pady=12, padx=18, anchor="w")
+
+        self._update_dashboard()
+
+    def _update_insight(self):
+        # Generate a simple insight
+        exp = self.data.total_expenses()
+        budget = self.data.budget
+        if exp == 0:
+            msg = "You haven't recorded any expenses yet. Start tracking to get insights!"
+        elif budget > 0 and exp > budget * 0.9:
+            msg = f"⚠️ You're close to your monthly budget! Only ₱{budget - exp:.2f} remaining."
+        elif budget > 0 and exp < budget * 0.5:
+            msg = "✨ You're spending less than half your budget. Keep up the great work!"
+        else:
+            msg = "You're making steady progress. Stay mindful of your spending."
+        self.insight_lbl.configure(text=msg)
+
+    def _update_dashboard(self):
+        self._update_stats()
+        self._draw_flow_chart()
+        self._draw_donut()
+        self._draw_networth()
+        self._draw_alerts()
+        n = len(self.data.transactions)
+        g = len(self.data.goals)
+        sv = sum(x["current"] for x in self.data.goals)
+        self._info_lbl.configure(
+            text=f"☰  {n} transactions recorded   ◎  {g} active goals   ₱{sv:,.2f} saved towards goals"
+        )
+        self._update_insight()
+
+    def _update_stats(self):
+        inc = self.data.total_income()
+        exp = self.data.total_expenses()
+        bal = inc - exp
+        usage = (exp / self.data.budget * 100) if self.data.budget > 0 else 0
+        self._stat_vars["balance"].set(f"₱{bal:,.2f}")
+        self._stat_vars["income"].set(f"₱{inc:,.2f}")
+        self._stat_vars["expenses"].set(f"₱{exp:,.2f}")
+        self._stat_vars["budget_usage"].set(f"{usage:.1f}%")
+
+    def _draw_flow_chart(self):
+        if not hasattr(self, "_flow_frame"): return
+        for w in self._flow_frame.winfo_children(): w.destroy()
+        monthly = self.data.monthly_totals(months=6)
+        if not monthly:
+            ctk.CTkLabel(self._flow_frame, text="Add transactions to see cash flow.",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(expand=True)
+            return
+        labels = [m[0] for m in monthly]
+        incomes= [m[1] for m in monthly]
+        exps   = [m[2] for m in monthly]
+        x = range(len(labels))
+        w = 0.35
+
+        fig = Figure(figsize=(7, 2.4), dpi=100, facecolor=self.card)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(self.card_light)
+        ax.bar([i - w/2 for i in x], incomes, w, color=self.success, alpha=0.85, label="Income")
+        ax.bar([i + w/2 for i in x], exps,    w, color=self.danger,  alpha=0.85, label="Expenses")
+        ax.set_xticks(list(x)); ax.set_xticklabels(labels, fontsize=9, color=self.text_muted)
+        ax.tick_params(colors=self.text_muted, labelsize=9)
+        ax.yaxis.tick_right(); ax.yaxis.set_tick_params(labelsize=8, colors=self.text_muted)
+        ax.grid(axis="y", linestyle="--", alpha=0.18, color=self.border)
+        ax.set_ylim(bottom=0)
+        for spine in ax.spines.values(): spine.set_color(self.border)
+        inc_patch = mpatches.Patch(color=self.success, label="Income")
+        exp_patch = mpatches.Patch(color=self.danger,  label="Expenses")
+        ax.legend(handles=[inc_patch, exp_patch], facecolor=self.card, labelcolor=self.text,
+                  fontsize=9, loc="upper left", framealpha=0.9)
+        fig.tight_layout(pad=0.6)
+        canvas = FigureCanvasTkAgg(fig, master=self._flow_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _draw_donut(self):
+        if not hasattr(self, "_donut_frame"): return
+        for w in self._donut_frame.winfo_children(): w.destroy()
+        spent = self.data.spending_by_category_this_month()
+        if not spent:
+            ctk.CTkLabel(self._donut_frame, text="No expenses this month yet.",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(expand=True)
+            return
+        sorted_items = sorted(spent.items(), key=lambda x: x[1], reverse=True)
+        labels = [c for c, _ in sorted_items]
+        values = [v for _, v in sorted_items]
+        colors = [self.cat_color(c) for c in labels]
+        total = sum(values)
+
+        fig = Figure(figsize=(3.8, 2.4), dpi=100, facecolor=self.card)
+        ax = fig.add_subplot(111)
+        wedges, _ = ax.pie(values, colors=colors, startangle=90,
+                           wedgeprops={"width": 0.44, "edgecolor": self.card, "linewidth": 2})
+        ax.text(0, 0, f"₱{total:,.0f}", ha="center", va="center",
+                fontsize=11, fontweight="bold", color=self.text)
+        ax.legend(wedges, [f"{l} ({v/total*100:.0f}%)" for l, v in zip(labels, values)],
+                  loc="center left", bbox_to_anchor=(0.95, 0.5),
+                  fontsize=7.5, facecolor=self.card, labelcolor=self.text, frameon=False)
+        fig.tight_layout(pad=0.4)
+        canvas = FigureCanvasTkAgg(fig, master=self._donut_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _draw_networth(self):
+        if not hasattr(self, "_nw_frame"): return
+        for w in self._nw_frame.winfo_children(): w.destroy()
+        pts = self.data.net_worth_series()
+        if not pts:
+            ctk.CTkLabel(self._nw_frame, text="Add transactions to see your net worth trend.",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(expand=True)
+            return
+        dates = [p[0] for p in pts]; balances = [p[1] for p in pts]
+        color = self.success if balances[-1] >= 0 else self.danger
+
+        fig = Figure(figsize=(12, 2), dpi=100, facecolor=self.card)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(self.card_light)
+        ax.plot(dates, balances, color=color, linewidth=2.5)
+        ax.fill_between(dates, balances, color=color, alpha=0.12)
+        ax.axhline(0, color=self.text_muted, linewidth=1, linestyle="--", alpha=0.4)
+        ax.tick_params(colors=self.text_muted, labelsize=8)
+        ax.grid(True, linestyle="--", alpha=0.15, color=self.border)
+        for spine in ax.spines.values(): spine.set_color(self.border)
+        fig.autofmt_xdate(rotation=0, ha="center")
+        fig.tight_layout(pad=0.5)
+        canvas = FigureCanvasTkAgg(fig, master=self._nw_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _draw_alerts(self):
+        if not hasattr(self, "_alerts_frame"): return
+        for w in self._alerts_frame.winfo_children(): w.destroy()
+        alerts = []
+        exp = self.data.total_expenses()
+        if self.data.budget > 0:
+            u = exp / self.data.budget
+            if u >= 1.0:
+                alerts.append((f"⚠  Overall budget exceeded ({u*100:.0f}% used).", self.danger))
+            elif u >= 0.8:
+                alerts.append((f"ℹ  You're at {u*100:.0f}% of your overall budget.", self.warning))
+        spent = self.data.spending_by_category_this_month()
+        for cat, limit in self.data.category_budgets.items():
+            s = spent.get(cat, 0)
+            if limit <= 0: continue
+            u = s / limit
+            if u >= 1.0:
+                alerts.append((f"⚠  '{cat}' budget exceeded ({u*100:.0f}% used this month).", self.danger))
+            elif u >= 0.8:
+                alerts.append((f"ℹ  '{cat}' at {u*100:.0f}% of its monthly budget.", self.warning))
+        for g in self.data.goals:
+            if g["target"] > 0 and g["current"] >= g["target"]:
+                alerts.append((f"🎉  Goal '{g['name']}' completed!", self.success))
+        for text, color in alerts[:5]:
+            banner = ctk.CTkFrame(self._alerts_frame, fg_color=self.card,
+                                  corner_radius=12, border_width=1, border_color=color)
+            banner.pack(fill="x", pady=3)
+            ctk.CTkLabel(banner, text=text, font=(FONT_FAMILY, 12, "bold"),
+                         text_color=color).pack(padx=16, pady=9, anchor="w")
+
+    # =========================================================================
+    # TRANSACTIONS (unchanged from previous, but kept for brevity)
+    # =========================================================================
+    def show_transactions(self):
+        self.current_view = "transactions"
+        self._set_nav("transactions")
+        self._clear_content()
+        self.editing_txn_id = None
+
+        self._page_header(self.content, "Transactions", "Add, edit and track every peso")
+
+        add_card = make_card(self.content, self, pady=(0, 10))
+        card_title(add_card, self, "Quick Add / Edit", None, "☰")
+        self._build_add_form(add_card)
+
+        list_card = ctk.CTkFrame(self.content, fg_color=self.card, corner_radius=18,
+                                 border_width=1, border_color=self.border)
+        list_card.pack(fill="both", expand=True, pady=(0, 16))
+
+        tb = ctk.CTkFrame(list_card, fg_color="transparent")
+        tb.pack(fill="x", padx=18, pady=(12, 6))
+
+        ctk.CTkLabel(tb, text="History", font=(FONT_FAMILY, 14, "bold"),
+                     text_color=self.cyan).pack(side="left")
+
+        right_tb = ctk.CTkFrame(tb, fg_color="transparent")
+        right_tb.pack(side="right")
+
+        self.search_entry = ctk.CTkEntry(right_tb, width=180, placeholder_text="🔍  Search…",
+                                         textvariable=self.search_var, fg_color=self.input_bg,
+                                         border_color=self.border, corner_radius=10)
+        self.search_entry.pack(side="left", padx=4)
+        self.search_var.trace_add("write", lambda *a: self.refresh_transactions())
+
+        cat_opts = ["All"] + self.data.all_categories()
+        self.cat_filter_combo = ctk.CTkComboBox(right_tb, width=130, values=cat_opts,
+                                                variable=self.cat_filter,
+                                                fg_color=self.input_bg, border_color=self.border,
+                                                corner_radius=10,
+                                                command=lambda v: self.refresh_transactions())
+        self.cat_filter_combo.pack(side="left", padx=4)
+
+        sort_opts = ["Date (newest)", "Date (oldest)", "Amount ↓", "Amount ↑", "Category"]
+        self.sort_combo = ctk.CTkComboBox(right_tb, width=150, values=sort_opts,
+                                          variable=self.sort_var,
+                                          fg_color=self.input_bg, border_color=self.border,
+                                          corner_radius=10,
+                                          command=lambda v: self.refresh_transactions())
+        self.sort_combo.pack(side="left", padx=4)
+
+        ctk.CTkButton(right_tb, text="⬇ Import CSV", command=self.import_csv_dialog,
+                      fg_color=self.card_light, text_color=self.text, hover_color=self.card,
+                      border_width=1, border_color=self.border, corner_radius=10,
+                      height=32, width=110).pack(side="left", padx=4)
+
+        ctk.CTkButton(right_tb, text="⬆ Export CSV", command=self.export_csv,
+                      fg_color=self.card_light, text_color=self.text, hover_color=self.card,
+                      border_width=1, border_color=self.border, corner_radius=10,
+                      height=32, width=110).pack(side="left", padx=4)
+
+        if HAS_PDF:
+            ctk.CTkButton(right_tb, text="📄 Export PDF", command=self.export_pdf,
+                          fg_color=self.card_light, text_color=self.text, hover_color=self.card,
+                          border_width=1, border_color=self.border, corner_radius=10,
+                          height=32, width=110).pack(side="left", padx=4)
+
+        ctk.CTkButton(right_tb, text="✕ Clear All", command=self.clear_all,
+                      fg_color="transparent", text_color=self.danger, hover_color="#4A1A2A",
+                      corner_radius=10, height=32, width=90).pack(side="left", padx=4)
+
+        chip_row = ctk.CTkFrame(list_card, fg_color="transparent")
+        chip_row.pack(fill="x", padx=18, pady=(0, 8))
+        for f, lbl in [("all", "All"), ("income", "Income"), ("expense", "Expense")]:
+            ctk.CTkRadioButton(chip_row, text=lbl, variable=self.filter_var, value=f,
+                               command=self.refresh_transactions,
+                               text_color=self.text_muted, fg_color=self.cyan,
+                               font=(FONT_FAMILY, 12)).pack(side="left", padx=10)
+
+        self._tx_summary = ctk.CTkLabel(list_card, text="", font=(FONT_FAMILY, 11),
+                                         text_color=self.text_muted)
+        self._tx_summary.pack(anchor="w", padx=18, pady=(0, 6))
+
+        hdr = ctk.CTkFrame(list_card, fg_color=self.card_light, corner_radius=0)
+        hdr.pack(fill="x", padx=18)
+        for txt, w in [("Date", 110), ("Description", 0), ("Category", 150), ("Amount", 140), ("Notes", 160), ("", 90)]:
+            kw = {"width": w} if w else {}
+            ctk.CTkLabel(hdr, text=txt, font=(FONT_FAMILY, 11, "bold"),
+                         text_color=self.text_muted, anchor="w", **kw).pack(side="left", padx=8, pady=6)
+
+        self._tx_scroll = ctk.CTkScrollableFrame(list_card, fg_color="transparent", corner_radius=0)
+        self._tx_scroll.pack(fill="both", expand=True, padx=18, pady=(4, 14))
+
+        self.refresh_transactions()
+
+    def _build_add_form(self, parent):
+        form = ctk.CTkFrame(parent, fg_color="transparent")
+        form.pack(fill="x", padx=18, pady=(4, 14))
+
+        ctk.CTkLabel(form, text="Description", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        ctk.CTkLabel(form, text="Amount", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=1, sticky="w", padx=4)
+        ctk.CTkLabel(form, text="Type", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=2, sticky="w", padx=4)
+        ctk.CTkLabel(form, text="Category", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=3, sticky="w", padx=4)
+        ctk.CTkLabel(form, text="Date (YYYY-MM-DD)", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=4, sticky="w", padx=4)
+        ctk.CTkLabel(form, text="Notes (optional)", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).grid(row=0, column=5, sticky="w", padx=4)
+
+        self.desc_entry = ctk.CTkEntry(form, width=220, placeholder_text="e.g. Coffee, Salary",
+                                        fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self.desc_entry.grid(row=1, column=0, padx=4, pady=4, sticky="ew")
+
+        self.amount_entry = ctk.CTkEntry(form, width=120, placeholder_text="0.00",
+                                          fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self.amount_entry.grid(row=1, column=1, padx=4, pady=4)
+
+        self.trans_type = ctk.StringVar(value="expense")
+        type_frame = ctk.CTkFrame(form, fg_color=self.input_bg, corner_radius=10,
+                                   border_width=1, border_color=self.border)
+        type_frame.grid(row=1, column=2, padx=4, pady=4)
+        for val, lbl, color in [("expense", "Expense", self.danger), ("income", "Income", self.success)]:
+            ctk.CTkRadioButton(type_frame, text=lbl, variable=self.trans_type, value=val,
+                               fg_color=color, text_color=color,
+                               font=(FONT_FAMILY, 12)).pack(side="left", padx=8, pady=6)
+
+        self.cat_entry = ctk.CTkComboBox(form, width=150, values=self.data.all_categories(),
+                                          fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self.cat_entry.set("")
+        self.cat_entry.grid(row=1, column=3, padx=4, pady=4)
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        self.date_entry = ctk.CTkEntry(form, width=140, placeholder_text=today_str,
+                                        fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self.date_entry.insert(0, today_str)
+        self.date_entry.grid(row=1, column=4, padx=4, pady=4)
+
+        self.notes_entry = ctk.CTkEntry(form, width=180, placeholder_text="Optional note",
+                                         fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self.notes_entry.grid(row=1, column=5, padx=4, pady=4)
+
+        btn_frame = ctk.CTkFrame(form, fg_color="transparent")
+        btn_frame.grid(row=1, column=6, padx=4, pady=4)
+        self._add_card_title_var = ctk.StringVar(value="+ Add (Ctrl+S)")
+        self._add_btn = ctk.CTkButton(btn_frame, textvariable=self._add_card_title_var,
+                                       command=self._submit_transaction,
+                                       fg_color=self.cyan, text_color="#000000",
+                                       font=(FONT_FAMILY, 12, "bold"), height=36, width=120,
+                                       corner_radius=10)
+        self._add_btn.pack(side="left", padx=2)
+        self._cancel_btn = ctk.CTkButton(btn_frame, text="Cancel (Esc)", command=self._cancel_edit,
+                                          fg_color=self.card_light, text_color=self.text_muted,
+                                          height=36, width=100, corner_radius=10)
+
+        for entry in [self.desc_entry, self.amount_entry, self.date_entry, self.notes_entry]:
+            entry.bind("<Return>", lambda e: self._submit_transaction())
+
+    # ── Filter state ──────────────────────────────────────────────────────────
+    def _get_filtered_sorted(self):
+        fv = self.filter_var.get(); cv = self.cat_filter.get(); sv = self.search_var.get().lower().strip()
+        result = []
+        for t in self.data.transactions:
+            if fv == "income"  and t["amount"] <= 0: continue
+            if fv == "expense" and t["amount"] >= 0: continue
+            if cv != "All" and t.get("category") != cv: continue
+            if sv and sv not in t["description"].lower(): continue
+            result.append(t)
+        mode = self.sort_var.get()
+        if mode == "Date (newest)": result.sort(key=lambda x: x["id"], reverse=True)
+        elif mode == "Date (oldest)": result.sort(key=lambda x: x["id"])
+        elif mode == "Amount ↓": result.sort(key=lambda x: x["amount"], reverse=True)
+        elif mode == "Amount ↑": result.sort(key=lambda x: x["amount"])
+        elif mode == "Category": result.sort(key=lambda x: x.get("category", "").lower())
+        return result
+
+    def refresh_transactions(self):
+        if not hasattr(self, "_tx_scroll"): return
+        filtered = self._get_filtered_sorted()
+        inc = sum(t["amount"] for t in filtered if t["amount"] > 0)
+        exp = abs(sum(t["amount"] for t in filtered if t["amount"] < 0))
+        self._tx_summary.configure(
+            text=f"{len(filtered)} transactions   ↑ ₱{inc:,.2f}   ↓ ₱{exp:,.2f}   Net ₱{inc-exp:,.2f}"
+        )
+        for w in self._tx_scroll.winfo_children(): w.destroy()
+
+        if not filtered:
+            ctk.CTkLabel(self._tx_scroll, text="No transactions match your filters.",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(pady=30)
+            return
+
+        for i, t in enumerate(filtered[:300]):
+            bg = self.card if i % 2 == 0 else self.row_alt
+            is_income = t["amount"] > 0
+            amt_color = self.success if is_income else self.danger
+            emoji = cat_emoji(t.get("category", ""))
+
+            row = ctk.CTkFrame(self._tx_scroll, fg_color=bg, corner_radius=10)
+            row.pack(fill="x", pady=1)
+
+            date_str = datetime.fromisoformat(t["date"]).strftime("%b %d, %Y")
+            ctk.CTkLabel(row, text=date_str, font=(FONT_FAMILY, 11),
+                         text_color=self.text_muted, width=110, anchor="w"
+                         ).pack(side="left", padx=8, pady=9)
+
+            desc_frame = ctk.CTkFrame(row, fg_color="transparent")
+            desc_frame.pack(side="left", fill="x", expand=True, padx=4)
+            ctk.CTkLabel(desc_frame, text=f"{emoji}  {t['description']}",
+                         font=(FONT_FAMILY, 13), text_color=self.text, anchor="w"
+                         ).pack(anchor="w", pady=8)
+
+            cat = t.get("category", "")
+            badge_bg = self.cat_color(cat)
+            badge = ctk.CTkLabel(row, text=cat, font=(FONT_FAMILY, 10, "bold"),
+                                  text_color="#000000", fg_color=badge_bg,
+                                  corner_radius=8, width=120, height=24)
+            badge.pack(side="left", padx=8)
+
+            sign = "+" if is_income else "−"
+            ctk.CTkLabel(row, text=f"{sign}₱{abs(t['amount']):,.2f}",
+                         font=(FONT_FAMILY, 13, "bold"), text_color=amt_color,
+                         width=140, anchor="w").pack(side="left", padx=8)
+
+            notes = t.get("notes", "")
+            ctk.CTkLabel(row, text=notes if notes else "—",
+                         font=(FONT_FAMILY, 11), text_color=self.text_muted,
+                         width=160, anchor="w").pack(side="left", padx=4)
+
+            act = ctk.CTkFrame(row, fg_color="transparent", width=90)
+            act.pack(side="left", padx=4)
+            ctk.CTkButton(act, text="✏", width=32, height=28, fg_color="transparent",
+                          text_color=self.cyan, hover_color=self.card_light, corner_radius=8,
+                          command=lambda tid=t["id"]: self._start_edit(tid)
+                          ).pack(side="left", padx=2)
+            ctk.CTkButton(act, text="✕", width=32, height=28, fg_color="transparent",
+                          text_color=self.danger, hover_color="#4A1A2A", corner_radius=8,
+                          command=lambda tid=t["id"]: self._delete_txn(tid)
+                          ).pack(side="left", padx=2)
+
+        if len(filtered) > 300:
+            ctk.CTkLabel(self._tx_scroll, text=f"Showing first 300 of {len(filtered)}.",
+                         font=(FONT_FAMILY, 11), text_color=self.text_muted).pack(pady=8)
+
+    # ── Transaction actions ──────────────────────────────────────────────────
+    def _submit_transaction(self):
+        desc   = self.desc_entry.get().strip()
+        amt_s  = self.amount_entry.get().strip()
+        cat    = self.cat_entry.get().strip()
+        notes  = self.notes_entry.get().strip()
+        date_s = self.date_entry.get().strip()
+
+        if not desc or not amt_s or not cat:
+            messagebox.showerror("Missing info", "Please fill Description, Amount and Category.")
+            return
+        try: amt = float(amt_s)
+        except ValueError:
+            messagebox.showerror("Invalid amount", "Amount must be a number."); return
+        if amt <= 0:
+            messagebox.showerror("Invalid amount", "Amount must be greater than zero."); return
+        signed = abs(amt) if self.trans_type.get() == "income" else -abs(amt)
+
+        try: date = datetime.strptime(date_s, "%Y-%m-%d") if date_s else datetime.now()
+        except ValueError:
+            messagebox.showerror("Invalid date", "Use YYYY-MM-DD format."); return
+
+        if self.editing_txn_id is not None:
+            self.data.update_transaction(self.editing_txn_id, desc, signed, cat, notes)
+            self._cancel_edit()
+        else:
+            self.data.add_transaction(desc, signed, cat, date=date, notes=notes)
+            self.desc_entry.delete(0, "end")
+            self.amount_entry.delete(0, "end")
+            self.notes_entry.delete(0, "end")
+            today = datetime.now().strftime("%Y-%m-%d")
+            self.date_entry.delete(0, "end"); self.date_entry.insert(0, today)
+            self.cat_entry.set("")
+
+        self.refresh_all()
+        self.status_lbl.configure(text=f"Saved transaction: {desc}")
+
+    def _start_edit(self, txn_id):
+        t = next((x for x in self.data.transactions if x["id"] == txn_id), None)
+        if not t: return
+        self.editing_txn_id = txn_id
+        self.desc_entry.delete(0, "end"); self.desc_entry.insert(0, t["description"])
+        self.amount_entry.delete(0, "end"); self.amount_entry.insert(0, f"{abs(t['amount']):.2f}")
+        self.trans_type.set("income" if t["amount"] > 0 else "expense")
+        self.cat_entry.set(t.get("category", ""))
+        self.notes_entry.delete(0, "end"); self.notes_entry.insert(0, t.get("notes", ""))
+        date_s = datetime.fromisoformat(t["date"]).strftime("%Y-%m-%d")
+        self.date_entry.delete(0, "end"); self.date_entry.insert(0, date_s)
+        self._add_card_title_var.set("💾 Save (Ctrl+S)")
+        self._cancel_btn.pack(side="left", padx=2)
+
+    def _cancel_edit(self):
+        self.editing_txn_id = None
+        for entry in [self.desc_entry, self.amount_entry, self.notes_entry]:
+            entry.delete(0, "end")
+        self.cat_entry.set(""); self.trans_type.set("expense")
+        self.date_entry.delete(0, "end")
+        self.date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        self._add_card_title_var.set("+ Add (Ctrl+S)")
+        self._cancel_btn.pack_forget()
+
+    def _delete_txn(self, txn_id):
+        t = next((x for x in self.data.transactions if x["id"] == txn_id), None)
+        if t and messagebox.askyesno("Delete", f"Delete '{t['description']}'?"):
+            self.data.delete_transaction(txn_id)
+            if self.editing_txn_id == txn_id: self._cancel_edit()
+            self.refresh_all()
+            self.status_lbl.configure(text=f"Deleted: {t['description']}")
+
+    def clear_all(self):
+        if messagebox.askyesno("Clear All", "Delete ALL transactions? This cannot be undone."):
+            self.data.clear_transactions()
+            self.refresh_all()
+            self.status_lbl.configure(text="All transactions cleared.")
+
+    def export_csv(self):
+        if not self.data.transactions:
+            messagebox.showinfo("Export", "No transactions to export."); return
+        fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not fp: return
+        with open(fp, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Date", "Description", "Category", "Amount", "Type", "Notes"])
+            for t in self.data.transactions:
+                date = datetime.fromisoformat(t["date"]).strftime("%Y-%m-%d")
+                typ = "Income" if t["amount"] > 0 else "Expense"
+                w.writerow([date, t["description"], t["category"], abs(t["amount"]), typ, t.get("notes", "")])
+        messagebox.showinfo("Exported", f"Saved to {fp}")
+        self.status_lbl.configure(text=f"Exported CSV: {fp}")
+
+    def export_pdf(self):
+        if not HAS_PDF:
+            messagebox.showinfo("PDF Export", "ReportLab not installed. Please install it with: pip install reportlab")
+            return
+        if not self.data.transactions:
+            messagebox.showinfo("Export", "No transactions to export."); return
+        fp = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if not fp: return
+        try:
+            c = canvas.Canvas(fp, pagesize=letter)
+            width, height = letter
+            c.setFont("Helvetica-Bold", 18)
+            c.drawString(50, height - 50, "Tribby Financial Report")
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, height - 80, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            c.setFont("Helvetica", 10)
+            y = height - 120
+            for t in self.data.transactions[:50]:
+                if y < 50:
+                    c.showPage()
+                    y = height - 50
+                    c.setFont("Helvetica", 10)
+                line = f"{datetime.fromisoformat(t['date']).strftime('%Y-%m-%d')}  {t['description']}  ₱{abs(t['amount']):,.2f}  {t.get('category','')}"
+                c.drawString(50, y, line[:100])
+                y -= 20
+            c.save()
+            messagebox.showinfo("Exported", f"PDF saved to {fp}")
+            self.status_lbl.configure(text=f"Exported PDF: {fp}")
+        except Exception as e:
+            messagebox.showerror("PDF Error", str(e))
+
+    def import_csv_dialog(self):
+        fp = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not fp: return
+        added, skipped = self.data.import_csv(fp)
+        self.refresh_all()
+        self.status_lbl.configure(text=f"Imported {added} rows, skipped {skipped}")
+        messagebox.showinfo("Import Complete", f"Imported {added} transactions. Skipped {skipped} rows.")
+
+    # =========================================================================
+    # BUDGET & GOALS  (unchanged from previous)
+    # =========================================================================
+    def show_budget_goals(self):
+        self.current_view = "budget"
+        self._set_nav("budget")
+        self._clear_content()
+        self._page_header(self.content, "Budget & Goals", "Plan your spending · track your savings")
+
+        outer = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        outer.pack(fill="both", expand=True)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(outer, fg_color=self.card, corner_radius=18,
+                            border_width=1, border_color=self.border)
+        left.grid(row=0, column=0, padx=(0, 8), pady=4, sticky="nsew")
+        card_title(left, self, "Monthly Budget", "Your overall spending limit", "◎")
+
+        disp_frame = ctk.CTkFrame(left, fg_color="transparent")
+        disp_frame.pack(fill="x", padx=18, pady=(6, 0))
+        self._budget_lbl = ctk.CTkLabel(disp_frame, text=f"₱{self.data.budget:,.2f}",
+                                         font=(FONT_FAMILY, 30, "bold"), text_color=self.cyan)
+        self._budget_lbl.pack(side="left")
+        ctk.CTkLabel(disp_frame, text="/ month", font=(FONT_FAMILY, 12),
+                     text_color=self.text_muted).pack(side="left", padx=8, pady=4)
+
+        qs = ctk.CTkFrame(left, fg_color="transparent")
+        qs.pack(fill="x", padx=18, pady=8)
+        ctk.CTkLabel(qs, text="Quick set:", font=(FONT_FAMILY, 11),
+                     text_color=self.text_muted).pack(side="left", padx=(0, 8))
+        for amt in [10000, 15000, 20000, 30000, 50000]:
+            ctk.CTkButton(qs, text=f"₱{amt:,}", width=76, height=30, fg_color=self.card_light,
+                          text_color=self.text, hover_color=self.border, corner_radius=8,
+                          border_width=1, border_color=self.border,
+                          command=lambda a=amt: self._set_budget(a)).pack(side="left", padx=3)
+
+        ce = ctk.CTkFrame(left, fg_color="transparent")
+        ce.pack(fill="x", padx=18, pady=(0, 8))
+        self._budget_entry = ctk.CTkEntry(ce, width=140, placeholder_text="Custom amount",
+                                           fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._budget_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(ce, text="Set", width=60, height=32, fg_color=self.cyan,
+                      text_color="#000000", corner_radius=10,
+                      command=self._set_budget_custom).pack(side="left")
+
+        self._budget_slider = ctk.CTkSlider(left, from_=1000, to=200000, number_of_steps=199,
+                                             command=self._set_budget, button_color=self.cyan,
+                                             progress_color=self.cyan, button_hover_color=self.purple)
+        self._budget_slider.pack(fill="x", padx=18, pady=(4, 10))
+        self._budget_slider.set(self.data.budget)
+
+        self._budget_prog = ctk.CTkProgressBar(left, height=10, corner_radius=99)
+        self._budget_prog.pack(fill="x", padx=18, pady=(0, 4))
+        self._budget_stats_lbl = ctk.CTkLabel(left, text="", font=(FONT_FAMILY, 11),
+                                               text_color=self.text_muted)
+        self._budget_stats_lbl.pack(pady=(0, 12))
+
+        section_sep(left, self)
+        card_title(left, self, "Category Budgets", "Monthly limits per category", "☰")
+
+        cf = ctk.CTkFrame(left, fg_color="transparent")
+        cf.pack(fill="x", padx=18, pady=(4, 8))
+        self._cat_budget_combo = ctk.CTkComboBox(cf, width=150, values=self.data.all_categories(),
+                                                  fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._cat_budget_combo.pack(side="left", padx=(0, 8))
+        self._cat_budget_entry = ctk.CTkEntry(cf, width=110, placeholder_text="Limit amount",
+                                               fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._cat_budget_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(cf, text="Set", width=60, height=32, fg_color=self.purple,
+                      text_color="#FFFFFF", corner_radius=10,
+                      command=self._set_cat_budget).pack(side="left")
+
+        self._cat_budgets_container = ctk.CTkScrollableFrame(left, fg_color="transparent", height=260)
+        self._cat_budgets_container.pack(fill="x", padx=16, pady=(0, 14))
+
+        right = ctk.CTkFrame(outer, fg_color=self.card, corner_radius=18,
+                             border_width=1, border_color=self.border)
+        right.grid(row=0, column=1, padx=(8, 0), pady=4, sticky="nsew")
+        card_title(right, self, "Savings Goals", "Track your financial targets", "↑")
+
+        gf = ctk.CTkFrame(right, fg_color="transparent")
+        gf.pack(fill="x", padx=18, pady=(4, 10))
+        self._goal_name = ctk.CTkEntry(gf, width=180, placeholder_text="Goal name",
+                                         fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._goal_name.pack(side="left", padx=(0, 8))
+        self._goal_target = ctk.CTkEntry(gf, width=130, placeholder_text="Target ₱",
+                                           fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._goal_target.pack(side="left", padx=(0, 8))
+        self._goal_date = ctk.CTkEntry(gf, width=130, placeholder_text="Target date (opt.)",
+                                         fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._goal_date.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(gf, text="+ Create", width=90, height=32, fg_color=self.purple,
+                      text_color="#FFFFFF", corner_radius=10,
+                      command=self._add_goal).pack(side="left")
+
+        self._goals_scroll = ctk.CTkScrollableFrame(right, fg_color="transparent")
+        self._goals_scroll.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        self._refresh_budget_ui()
+        self._refresh_cat_budgets()
+        self._refresh_goals()
+
+    def _set_budget(self, value):
+        v = int(float(value))
+        if v < 1000: return
+        self.data.budget = v; self.data.save_budget()
+        self._refresh_budget_ui()
+        self._update_stats()
+
+    def _set_budget_custom(self):
+        try:
+            v = float(self._budget_entry.get().strip())
+            if v < 1000: raise ValueError
+            self._set_budget(v)
+            self._budget_entry.delete(0, "end")
+        except ValueError:
+            messagebox.showerror("Error", "Enter an amount of at least ₱1,000.")
+
+    def _refresh_budget_ui(self):
+        if not hasattr(self, "_budget_lbl"): return
+        b = self.data.budget
+        self._budget_lbl.configure(text=f"₱{b:,.2f}")
+        self._budget_slider.set(b)
+        spent = self.data.total_expenses()
+        usage = spent / b if b > 0 else 0
+        color = self.danger if usage >= 1.0 else (self.warning if usage >= 0.8 else self.success)
+        self._budget_prog.configure(progress_color=color)
+        self._budget_prog.set(min(usage, 1.0))
+        remain = b - spent
+        self._budget_stats_lbl.configure(
+            text=f"Spent ₱{spent:,.2f}   |   {'Remaining' if remain >= 0 else 'Over by'} ₱{abs(remain):,.2f}"
+        )
+
+    def _set_cat_budget(self):
+        cat = self._cat_budget_combo.get().strip()
+        s = self._cat_budget_entry.get().strip()
+        if not cat: messagebox.showerror("Error", "Select a category."); return
+        try:
+            amt = float(s)
+            if amt <= 0: raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Enter a positive amount."); return
+        self.data.set_category_budget(cat, amt)
+        self._cat_budget_entry.delete(0, "end")
+        self._refresh_cat_budgets()
+
+    def _refresh_cat_budgets(self):
+        if not hasattr(self, "_cat_budgets_container"): return
+        for w in self._cat_budgets_container.winfo_children(): w.destroy()
+        if not self.data.category_budgets:
+            ctk.CTkLabel(self._cat_budgets_container, text="No category limits set yet.",
+                         font=(FONT_FAMILY, 12), text_color=self.text_muted).pack(pady=12)
+            return
+        spent = self.data.spending_by_category_this_month()
+        for cat, limit in self.data.category_budgets.items():
+            s = spent.get(cat, 0)
+            usage = min(s / limit, 1.0) if limit > 0 else 0
+            color = self.danger if usage >= 1.0 else (self.warning if usage >= 0.8 else self.success)
+
+            row = ctk.CTkFrame(self._cat_budgets_container, fg_color=self.card_light,
+                               corner_radius=12, border_width=1, border_color=self.border)
+            row.pack(fill="x", pady=4)
+            top = ctk.CTkFrame(row, fg_color="transparent")
+            top.pack(fill="x", padx=12, pady=(8, 2))
+            badge_color = self.cat_color(cat)
+            ctk.CTkLabel(top, text=f"{cat_emoji(cat)}  {cat}", font=(FONT_FAMILY, 12, "bold"),
+                         text_color=self.text).pack(side="left")
+            ctk.CTkLabel(top, text=f"₱{s:,.0f} / ₱{limit:,.0f}",
+                         font=(FONT_FAMILY, 11), text_color=color).pack(side="left", padx=10)
+            ctk.CTkButton(top, text="✕", width=26, height=26, fg_color="transparent",
+                          text_color=self.danger, hover_color="#4A1A2A",
+                          corner_radius=6, command=lambda c=cat: self._del_cat_budget(c)
+                          ).pack(side="right")
+            pb = ctk.CTkProgressBar(row, height=7, corner_radius=99, progress_color=color)
+            pb.pack(fill="x", padx=12, pady=(2, 10))
+            pb.set(usage)
+
+    def _del_cat_budget(self, cat):
+        self.data.set_category_budget(cat, 0)
+        self._refresh_cat_budgets()
+
+    def _add_goal(self):
+        name = self._goal_name.get().strip()
+        tstr = self._goal_target.get().strip()
+        dstr = self._goal_date.get().strip() or None
+        if not name or not tstr:
+            messagebox.showerror("Error", "Enter a goal name and target amount."); return
+        try:
+            target = float(tstr)
+            if target <= 0: raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Enter a valid positive target amount."); return
+        self.data.add_goal(name, target, target_date=dstr)
+        self._goal_name.delete(0, "end"); self._goal_target.delete(0, "end"); self._goal_date.delete(0, "end")
+        self._refresh_goals()
+        self._update_stats()
+
+    def _refresh_goals(self):
+        if not hasattr(self, "_goals_scroll"): return
+        for w in self._goals_scroll.winfo_children(): w.destroy()
+        if not self.data.goals:
+            ctk.CTkLabel(self._goals_scroll, text="✨  No goals yet. Create one above!",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(pady=30)
+            return
+        for g in self.data.goals:
+            pct = (g["current"] / g["target"] * 100) if g["target"] > 0 else 0
+            done = pct >= 100
+            bar_color = self.success if done else self.cyan
+
+            card = ctk.CTkFrame(self._goals_scroll, fg_color=self.card_light, corner_radius=14,
+                                border_width=1,
+                                border_color=self.success if done else self.border)
+            card.pack(fill="x", pady=5)
+
+            hdr = ctk.CTkFrame(card, fg_color="transparent")
+            hdr.pack(fill="x", padx=14, pady=(10, 2))
+            name_text = f"🎉  {g['name']}" if done else f"◎  {g['name']}"
+            ctk.CTkLabel(hdr, text=name_text, font=(FONT_FAMILY, 13, "bold"),
+                         text_color=self.success if done else self.cyan).pack(side="left")
+            ctk.CTkLabel(hdr, text=f"{pct:.0f}%", font=(FONT_FAMILY, 12, "bold"),
+                         text_color=bar_color).pack(side="left", padx=8)
+
+            if g.get("target_date"):
+                ctk.CTkLabel(hdr, text=f"🗓  {g['target_date']}", font=(FONT_FAMILY, 10),
+                             text_color=self.text_muted).pack(side="left", padx=4)
+
+            ctk.CTkButton(hdr, text="✕", width=26, height=26, fg_color="transparent",
+                          text_color=self.danger, hover_color="#4A1A2A", corner_radius=6,
+                          command=lambda gid=g["id"]: self._del_goal(gid)).pack(side="right")
+
+            ctk.CTkLabel(card, text=f"₱{g['current']:,.2f} saved  /  ₱{g['target']:,.2f} target",
+                         font=(FONT_FAMILY, 11), text_color=self.text_muted).pack(anchor="w", padx=14)
+
+            pb = ctk.CTkProgressBar(card, height=8, corner_radius=99, progress_color=bar_color)
+            pb.pack(fill="x", padx=14, pady=(4, 8))
+            pb.set(min(pct / 100, 1.0))
+
+            if not done:
+                dep_row = ctk.CTkFrame(card, fg_color="transparent")
+                dep_row.pack(fill="x", padx=14, pady=(0, 10))
+                ctk.CTkLabel(dep_row, text="Add:", font=(FONT_FAMILY, 10),
+                             text_color=self.text_muted).pack(side="left", padx=(0, 6))
+                for amt in [50, 100, 500, 1000]:
+                    ctk.CTkButton(dep_row, text=f"+₱{amt}", width=62, height=26,
+                                  fg_color=self.card, border_width=1, border_color=self.border,
+                                  text_color=self.text, hover_color=self.card_light,
+                                  corner_radius=8, font=(FONT_FAMILY, 10),
+                                  command=lambda a=amt, gid=g["id"]: self._deposit_goal(gid, a)
+                                  ).pack(side="left", padx=3)
+                custom = ctk.CTkEntry(dep_row, width=90, placeholder_text="Custom",
+                                      fg_color=self.input_bg, border_color=self.border, corner_radius=8,
+                                      font=(FONT_FAMILY, 10))
+                custom.pack(side="left", padx=6)
+                ctk.CTkButton(dep_row, text="Add", width=50, height=26,
+                              fg_color=self.purple, text_color="#FFFFFF", corner_radius=8,
+                              font=(FONT_FAMILY, 10),
+                              command=lambda gid=g["id"], e=custom: self._deposit_custom(gid, e)
+                              ).pack(side="left")
+
+    def _deposit_goal(self, gid, amount):
+        self.data.update_goal(gid, amount)
+        self._refresh_goals()
+        self._update_stats()
+        self.status_lbl.configure(text=f"Added ₱{amount} to goal")
+
+    def _deposit_custom(self, gid, entry):
+        try:
+            amt = float(entry.get().strip())
+            if amt <= 0: raise ValueError
+            self.data.update_goal(gid, amt)
+            entry.delete(0, "end")
+            self._refresh_goals()
+            self._update_stats()
+            self.status_lbl.configure(text=f"Added ₱{amt} to goal")
+        except ValueError:
+            messagebox.showerror("Error", "Enter a positive amount.")
+
+    def _del_goal(self, gid):
+        if messagebox.askyesno("Delete Goal", "Permanently delete this goal?"):
+            self.data.delete_goal(gid)
+            self._refresh_goals()
+            self._update_stats()
+            self.status_lbl.configure(text="Goal deleted")
+
+    # =========================================================================
+    # RECURRING  (unchanged)
+    # =========================================================================
     def show_recurring(self):
         self.current_view = "recurring"
-        self.set_active_nav("recurring")
-        self.clear_content()
+        self._set_nav("recurring")
+        self._clear_content()
+        self._page_header(self.content, "Recurring Transactions",
+                          "Automate bills, subscriptions and regular income")
 
-        header = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        ctk.CTkLabel(header, text="Recurring Transactions", font=("Segoe UI", 26, "bold"), text_color=self.text).pack(anchor="w")
-        ctk.CTkLabel(header, text="Automate bills, subscriptions, and regular income", font=("Segoe UI", 13), text_color=self.text_muted).pack(anchor="w")
-
-        # Add recurring form
-        add_card = ctk.CTkFrame(self.content_frame, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        add_card.pack(fill="x", pady=10)
-        ctk.CTkLabel(add_card, text="New Recurring Item", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(10, 5))
+        add_card = make_card(self.content, self, pady=(0, 10))
+        card_title(add_card, self, "New Recurring Item", None, "↻")
 
         form = ctk.CTkFrame(add_card, fg_color="transparent")
-        form.pack(pady=8, padx=20, fill="x")
+        form.pack(fill="x", padx=18, pady=(4, 14))
 
-        ctk.CTkLabel(form, text="Description:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=0, column=0, padx=5, pady=5, sticky="e")
-        self.rec_desc_entry = ctk.CTkEntry(form, width=220, placeholder_text="e.g., Rent, Netflix, Salary")
-        self.rec_desc_entry.grid(row=0, column=1, padx=5, pady=5)
+        for col, (lbl, w) in enumerate([
+            ("Description", 220), ("Amount", 120),
+            ("Type", 160), ("Category", 150), ("Repeats", 120)
+        ]):
+            ctk.CTkLabel(form, text=lbl, font=(FONT_FAMILY, 11), text_color=self.text_muted,
+                         ).grid(row=0, column=col, sticky="w", padx=4, pady=(0, 2))
 
-        ctk.CTkLabel(form, text="Amount:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=0, column=2, padx=5, pady=5, sticky="e")
-        self.rec_amount_entry = ctk.CTkEntry(form, width=110, placeholder_text="0.00")
-        self.rec_amount_entry.grid(row=0, column=3, padx=5, pady=5)
+        self._rec_desc = ctk.CTkEntry(form, width=220, placeholder_text="e.g. Rent, Netflix",
+                                       fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._rec_desc.grid(row=1, column=0, padx=4, pady=4)
 
-        self.rec_type = ctk.StringVar(value="expense")
-        ctk.CTkRadioButton(form, text="Income", variable=self.rec_type, value="income", text_color=self.success).grid(row=0, column=4, padx=8)
-        ctk.CTkRadioButton(form, text="Expense", variable=self.rec_type, value="expense", text_color=self.danger).grid(row=0, column=5, padx=8)
+        self._rec_amt = ctk.CTkEntry(form, width=120, placeholder_text="0.00",
+                                      fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._rec_amt.grid(row=1, column=1, padx=4, pady=4)
 
-        ctk.CTkLabel(form, text="Category:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        self.rec_cat_entry = ctk.CTkComboBox(form, width=160, values=self.data.all_categories())
-        self.rec_cat_entry.set("")
-        self.rec_cat_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        self._rec_type = ctk.StringVar(value="expense")
+        tf = ctk.CTkFrame(form, fg_color=self.input_bg, corner_radius=10,
+                          border_width=1, border_color=self.border)
+        tf.grid(row=1, column=2, padx=4, pady=4)
+        for val, lbl, color in [("expense", "Expense", self.danger), ("income", "Income", self.success)]:
+            ctk.CTkRadioButton(tf, text=lbl, variable=self._rec_type, value=val,
+                               fg_color=color, text_color=color,
+                               font=(FONT_FAMILY, 12)).pack(side="left", padx=8, pady=6)
 
-        ctk.CTkLabel(form, text="Repeats:", font=("Segoe UI", 11), text_color=self.text_muted).grid(row=1, column=2, padx=5, pady=5, sticky="e")
-        self.rec_interval = ctk.CTkComboBox(form, width=110, values=RECUR_INTERVALS)
-        self.rec_interval.set("Monthly")
-        self.rec_interval.grid(row=1, column=3, padx=5, pady=5)
+        self._rec_cat = ctk.CTkComboBox(form, width=150, values=self.data.all_categories(),
+                                         fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._rec_cat.set(""); self._rec_cat.grid(row=1, column=3, padx=4, pady=4)
 
-        ctk.CTkButton(form, text="\u2795 Add Recurring", command=self.add_recurring_item, fg_color=self.cyan,
-                       text_color="#000000", font=("Segoe UI", 11, "bold"), height=32).grid(row=1, column=4, columnspan=2, padx=8, pady=5, sticky="w")
+        self._rec_interval = ctk.CTkComboBox(form, width=120, values=RECUR_INTERVALS,
+                                              fg_color=self.input_bg, border_color=self.border, corner_radius=10)
+        self._rec_interval.set("Monthly")
+        self._rec_interval.grid(row=1, column=4, padx=4, pady=4)
 
-        # List of recurring items
-        list_card = ctk.CTkFrame(self.content_frame, fg_color=self.card_bg_light, corner_radius=16, border_width=1, border_color=self.border)
-        list_card.pack(fill="both", expand=True, pady=(10, 20))
-        ctk.CTkLabel(list_card, text="Active Recurring Items", font=("Segoe UI", 14, "bold"), text_color=self.cyan).pack(anchor="w", padx=20, pady=(12, 5))
+        ctk.CTkButton(form, text="+ Add Recurring", command=self._add_recurring,
+                      fg_color=self.cyan, text_color="#000000", font=(FONT_FAMILY, 12, "bold"),
+                      height=36, corner_radius=10).grid(row=1, column=5, padx=10, pady=4, sticky="w")
 
-        self.recurring_scroll = ctk.CTkScrollableFrame(list_card, fg_color=self.card_bg, corner_radius=12)
-        self.recurring_scroll.pack(fill="both", expand=True, padx=20, pady=(5, 15))
+        rec_items = self.data.recurring
+        monthly_cost = sum(
+            (abs(r["amount"]) * (30 if r["interval"]=="Daily" else
+                                  4.33 if r["interval"]=="Weekly" else
+                                  1 if r["interval"]=="Monthly" else
+                                  1/12))
+            for r in rec_items
+        )
+        strip = ctk.CTkFrame(self.content, fg_color=self.card_light, corner_radius=12,
+                             border_width=1, border_color=self.border)
+        strip.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(strip,
+                     text=f"↻  {len(rec_items)} recurring item{'s' if len(rec_items)!=1 else ''}   |   "
+                          f"Est. monthly cost: ₱{monthly_cost:,.2f}",
+                     font=(FONT_FAMILY, 12), text_color=self.text_muted).pack(pady=8, padx=18, anchor="w")
 
-        self.refresh_recurring()
+        list_card = ctk.CTkFrame(self.content, fg_color=self.card, corner_radius=18,
+                                 border_width=1, border_color=self.border)
+        list_card.pack(fill="both", expand=True, pady=(0, 16))
+        card_title(list_card, self, "Active Items", None, "↻")
 
-    def add_recurring_item(self):
-        desc = self.rec_desc_entry.get().strip()
-        amt_str = self.rec_amount_entry.get().strip()
-        cat = self.rec_cat_entry.get().strip()
-        interval = self.rec_interval.get()
-        if not desc or not amt_str or not cat:
-            messagebox.showerror("Missing info", "Please fill all fields.")
-            return
+        self._rec_scroll = ctk.CTkScrollableFrame(list_card, fg_color="transparent")
+        self._rec_scroll.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+
+        self._refresh_recurring()
+
+    def _add_recurring(self):
+        desc = self._rec_desc.get().strip()
+        amts = self._rec_amt.get().strip()
+        cat = self._rec_cat.get().strip()
+        intv = self._rec_interval.get()
+        if not desc or not amts or not cat:
+            messagebox.showerror("Missing info", "Fill Description, Amount and Category."); return
         try:
-            amt = float(amt_str)
+            amt = float(amts)
+            if amt <= 0: raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid amount", "Amount must be a number.")
-            return
-        if amt <= 0:
-            messagebox.showerror("Invalid amount", "Amount must be greater than zero.")
-            return
-        if self.rec_type.get() == "expense":
-            amt = -abs(amt)
-        else:
-            amt = abs(amt)
+            messagebox.showerror("Invalid", "Enter a positive amount."); return
+        signed = abs(amt) if self._rec_type.get() == "income" else -abs(amt)
+        self.data.add_recurring(desc, signed, cat, intv, datetime.now())
+        self._rec_desc.delete(0, "end"); self._rec_amt.delete(0, "end"); self._rec_cat.set("")
+        self._refresh_recurring()
+        self.status_lbl.configure(text=f"Added recurring: {desc}")
 
-        self.data.add_recurring(desc, amt, cat, interval, datetime.now())
-        self.rec_desc_entry.delete(0, "end")
-        self.rec_amount_entry.delete(0, "end")
-        self.rec_cat_entry.set("")
-        self.refresh_recurring()
-        messagebox.showinfo("Success", f"'{desc}' will repeat {interval.lower()}.")
-
-    def refresh_recurring(self):
-        if not hasattr(self, "recurring_scroll"):
-            return
-        for w in self.recurring_scroll.winfo_children():
-            w.destroy()
-
+    def _refresh_recurring(self):
+        if not hasattr(self, "_rec_scroll"): return
+        for w in self._rec_scroll.winfo_children(): w.destroy()
         if not self.data.recurring:
-            ctk.CTkLabel(self.recurring_scroll, text="\u2728 No recurring items yet. Add one above! \u2728",
-                          font=("Segoe UI", 13), text_color=self.text_muted).pack(pady=30)
+            ctk.CTkLabel(self._rec_scroll, text="✨  No recurring items yet. Add one above!",
+                         font=(FONT_FAMILY, 13), text_color=self.text_muted).pack(pady=30)
             return
+        now = datetime.now()
+        items = sorted(self.data.recurring, key=lambda r: r["next_date"])
+        for r in items:
+            is_income = r["amount"] > 0
+            amt_color = self.success if is_income else self.danger
+            sign = "+" if is_income else "−"
+            next_dt   = datetime.fromisoformat(r["next_date"])
+            days_until= (next_dt.date() - now.date()).days
 
-        for r in self.data.recurring:
-            row = ctk.CTkFrame(self.recurring_scroll, fg_color=self.card_bg_light, corner_radius=10, border_width=1, border_color=self.border)
+            if days_until < 0:   due_lbl = "Overdue";  due_color = self.danger
+            elif days_until == 0: due_lbl = "Due today"; due_color = self.warning
+            elif days_until <= 3: due_lbl = f"In {days_until}d"; due_color = self.warning
+            else:                 due_lbl = next_dt.strftime("%b %d, %Y"); due_color = self.text_muted
+
+            row = ctk.CTkFrame(self._rec_scroll, fg_color=self.card_light, corner_radius=14,
+                               border_width=1, border_color=self.border)
             row.pack(fill="x", pady=4)
 
             left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=12, pady=10)
-            ctk.CTkLabel(left, text=r["description"], font=("Segoe UI", 12, "bold"), text_color=self.text).pack(anchor="w")
-            next_date = datetime.fromisoformat(r["next_date"]).strftime("%Y-%m-%d")
-            ctk.CTkLabel(left, text=f"{r['interval']}  |  Next: {next_date}  |  {r['category']}",
-                          font=("Segoe UI", 10), text_color=self.text_muted).pack(anchor="w")
+            left.pack(side="left", fill="x", expand=True, padx=14, pady=10)
 
-            amount_color = self.success if r["amount"] > 0 else self.danger
-            sign = "+" if r["amount"] > 0 else "-"
-            ctk.CTkLabel(row, text=f"{sign}\u20b1{abs(r['amount']):,.2f}", font=("Segoe UI", 13, "bold"),
-                          text_color=amount_color).pack(side="left", padx=10)
+            top = ctk.CTkFrame(left, fg_color="transparent")
+            top.pack(fill="x")
+            ctk.CTkLabel(top, text=f"{cat_emoji(r['category'])}  {r['description']}",
+                         font=(FONT_FAMILY, 13, "bold"), text_color=self.text).pack(side="left")
 
-            ctk.CTkButton(row, text="\U0001F5D1\ufe0f", width=36, height=32, fg_color="transparent",
-                           text_color=self.danger, hover_color="#4A1A2A",
-                           command=lambda rid=r["id"]: self.delete_recurring_item(rid)).pack(side="right", padx=10)
+            badge_bg = self.cat_color(r["category"])
+            ctk.CTkLabel(top, text=r["category"], font=(FONT_FAMILY, 9, "bold"),
+                         text_color="#000000", fg_color=badge_bg, corner_radius=6,
+                         width=80, height=20).pack(side="left", padx=10)
 
-    def delete_recurring_item(self, rec_id):
-        if messagebox.askyesno("Delete", "Remove this recurring item? Past transactions will remain."):
-            self.data.delete_recurring(rec_id)
-            self.refresh_recurring()
+            meta = ctk.CTkFrame(left, fg_color="transparent")
+            meta.pack(fill="x", pady=(3, 0))
+            ctk.CTkLabel(meta, text=f"↻  {r['interval']}",
+                         font=(FONT_FAMILY, 10), text_color=self.text_muted).pack(side="left")
+            ctk.CTkLabel(meta, text=f"  |  🗓  {due_lbl}",
+                         font=(FONT_FAMILY, 10), text_color=due_color).pack(side="left")
 
-    # ------------------------------------------------------------
-    # Core logic & refresh methods
-    # ------------------------------------------------------------
+            right = ctk.CTkFrame(row, fg_color="transparent")
+            right.pack(side="right", padx=14, pady=10)
+            ctk.CTkLabel(right, text=f"{sign}₱{abs(r['amount']):,.2f}",
+                         font=(FONT_FAMILY, 14, "bold"), text_color=amt_color).pack(anchor="e")
+            ctk.CTkButton(right, text="✕ Remove", width=90, height=26,
+                          fg_color="transparent", text_color=self.danger,
+                          hover_color="#4A1A2A", corner_radius=8, font=(FONT_FAMILY, 10),
+                          command=lambda rid=r["id"]: self._del_recurring(rid)).pack(anchor="e", pady=(4, 0))
+
+    def _del_recurring(self, rid):
+        if messagebox.askyesno("Remove", "Remove this recurring item? Past transactions stay."):
+            self.data.delete_recurring(rid)
+            self._refresh_recurring()
+            self.status_lbl.configure(text="Recurring item removed")
+
+    # =========================================================================
+    # Global refresh
+    # =========================================================================
     def refresh_all(self):
-        self.update_stats()
+        self._update_stats()
         if self.current_view == "dashboard":
-            self.update_dashboard()
+            self._update_dashboard()
         elif self.current_view == "transactions":
             self.refresh_transactions()
         elif self.current_view == "budget":
-            self.update_budget_ui()
-            self.refresh_category_budgets()
-            self.refresh_goals()
+            self._refresh_budget_ui()
+            self._refresh_cat_budgets()
+            self._refresh_goals()
         elif self.current_view == "recurring":
-            self.refresh_recurring()
-
-    def update_stats(self):
-        incomes = [t["amount"] for t in self.data.transactions if t["amount"] > 0]
-        expenses = [t["amount"] for t in self.data.transactions if t["amount"] < 0]
-        total_income = sum(incomes)
-        total_expense = abs(sum(expenses))
-        balance = total_income - total_expense
-        spent = total_expense
-        usage = (spent / self.data.budget * 100) if self.data.budget > 0 else 0
-        if hasattr(self, "stat_vars"):
-            self.stat_vars["balance"].set(f"\u20b1{balance:,.2f}")
-            self.stat_vars["income"].set(f"\u20b1{total_income:,.2f}")
-            self.stat_vars["expenses"].set(f"\u20b1{total_expense:,.2f}")
-            self.stat_vars["budget_usage"].set(f"{usage:.1f}%")
-
-    def update_dashboard(self):
-        self.update_stats()
-        self.update_dashboard_chart()
-        self.update_category_chart()
-        self.update_networth_chart()
-        self.update_alerts()
-        txn_count = len(self.data.transactions)
-        goal_count = len(self.data.goals)
-        total_saved = sum(g["current"] for g in self.data.goals)
-        self.info_label.configure(
-            text=f"\U0001F4CA {txn_count} transactions recorded  |  \U0001F3AF {goal_count} active goals  |  \U0001F4B0 \u20b1{total_saved:,.2f} saved towards goals"
-        )
-
-    def update_alerts(self):
-        if not hasattr(self, "alerts_frame"):
-            return
-        for w in self.alerts_frame.winfo_children():
-            w.destroy()
-
-        alerts = []
-        total_expense = abs(sum(t["amount"] for t in self.data.transactions if t["amount"] < 0))
-        if self.data.budget > 0:
-            usage = total_expense / self.data.budget
-            if usage >= 1.0:
-                alerts.append((f"\u26A0\ufe0f You've exceeded your overall budget ({usage*100:.0f}% used).", self.danger))
-            elif usage >= 0.8:
-                alerts.append((f"\u26A0\ufe0f You're at {usage*100:.0f}% of your overall budget.", self.warning))
-
-        spent_by_cat = self.spending_by_category_this_month()
-        for cat, limit in self.data.category_budgets.items():
-            spent = spent_by_cat.get(cat, 0)
-            if limit <= 0:
-                continue
-            usage = spent / limit
-            if usage >= 1.0:
-                alerts.append((f"\u26A0\ufe0f '{cat}' budget exceeded ({usage*100:.0f}% used this month).", self.danger))
-            elif usage >= 0.8:
-                alerts.append((f"\u26A0\ufe0f '{cat}' spending at {usage*100:.0f}% of its monthly budget.", self.warning))
-
-        for g in self.data.goals:
-            if g["target"] > 0 and g["current"] >= g["target"]:
-                alerts.append((f"\U0001F389 Goal '{g['name']}' completed!", self.success))
-
-        if not alerts:
-            return
-
-        for text, color in alerts[:5]:
-            banner = ctk.CTkFrame(self.alerts_frame, fg_color=self.card_bg_light, corner_radius=10, border_width=1, border_color=color)
-            banner.pack(fill="x", pady=4)
-            ctk.CTkLabel(banner, text=text, font=("Segoe UI", 12, "bold"), text_color=color).pack(padx=15, pady=8, anchor="w")
-
-    def update_dashboard_chart(self):
-        if not hasattr(self, "chart_frame"):
-            return
-        for w in self.chart_frame.winfo_children():
-            w.destroy()
-        monthly = {}
-        for t in self.data.transactions:
-            date = datetime.fromisoformat(t["date"])
-            month_key = date.strftime("%B %Y")
-            if month_key not in monthly:
-                monthly[month_key] = {"income": 0, "expenses": 0}
-            if t["amount"] > 0:
-                monthly[month_key]["income"] += t["amount"]
-            else:
-                monthly[month_key]["expenses"] += abs(t["amount"])
-        sorted_months = sorted(monthly.keys(), key=lambda x: datetime.strptime(x, "%B %Y"))
-        last_months = sorted_months[-6:] if len(sorted_months) >= 6 else sorted_months
-        if not last_months:
-            ctk.CTkLabel(self.chart_frame, text="Add transactions to see trends", font=("Segoe UI", 13), text_color=self.text_muted).pack(expand=True)
-            return
-        incomes = [monthly[m]["income"] for m in last_months]
-        expenses = [monthly[m]["expenses"] for m in last_months]
-        labels = [m.split()[0][:3] + " '" + m.split()[1][2:] for m in last_months]
-
-        fig = Figure(figsize=(8, 2.4), dpi=100, facecolor=self.card_bg_light)
-        ax = fig.add_subplot(111)
-        ax.set_facecolor(self.card_bg)
-        ax.plot(labels, incomes, marker="o", color=self.cyan, linewidth=2.5, label="Income")
-        ax.plot(labels, expenses, marker="s", color=self.danger, linewidth=2.5, label="Expenses")
-        ax.fill_between(labels, incomes, color=self.cyan, alpha=0.15)
-        ax.fill_between(labels, expenses, color=self.danger, alpha=0.15)
-        ax.tick_params(colors=self.text_muted, labelsize=10)
-        ax.grid(True, linestyle="--", alpha=0.2, color=self.border)
-        ax.legend(loc="upper left", facecolor=self.card_bg_light, labelcolor=self.text, fontsize=10)
-        ax.set_ylim(bottom=0)
-        for spine in ax.spines.values():
-            spine.set_color(self.border)
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    def update_category_chart(self):
-        if not hasattr(self, "category_chart_frame"):
-            return
-        for w in self.category_chart_frame.winfo_children():
-            w.destroy()
-
-        spent_by_cat = self.spending_by_category_this_month()
-        if not spent_by_cat:
-            ctk.CTkLabel(self.category_chart_frame, text="No expenses this month yet",
-                          font=("Segoe UI", 13), text_color=self.text_muted).pack(expand=True)
-            return
-
-        sorted_items = sorted(spent_by_cat.items(), key=lambda x: x[1], reverse=True)
-        labels = [c for c, _ in sorted_items]
-        values = [v for _, v in sorted_items]
-        colors = [self.category_color(c) for c in labels]
-
-        fig = Figure(figsize=(4.5, 2.4), dpi=100, facecolor=self.card_bg_light)
-        ax = fig.add_subplot(111)
-        wedges, _ = ax.pie(values, colors=colors, startangle=90,
-                            wedgeprops={"width": 0.42, "edgecolor": self.card_bg_light, "linewidth": 2})
-        total = sum(values)
-        ax.text(0, 0, f"\u20b1{total:,.0f}", ha="center", va="center", fontsize=12, fontweight="bold", color=self.text)
-        ax.legend(wedges, [f"{l} ({v/total*100:.0f}%)" for l, v in zip(labels, values)],
-                  loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8,
-                  facecolor=self.card_bg_light, labelcolor=self.text, frameon=False)
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=self.category_chart_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    def update_networth_chart(self):
-        if not hasattr(self, "networth_chart_frame"):
-            return
-        for w in self.networth_chart_frame.winfo_children():
-            w.destroy()
-
-        if not self.data.transactions:
-            ctk.CTkLabel(self.networth_chart_frame, text="Add transactions to see your net worth trend",
-                          font=("Segoe UI", 13), text_color=self.text_muted).pack(expand=True)
-            return
-
-        sorted_txns = sorted(self.data.transactions, key=lambda x: x["id"])
-        running_total = 0
-        points = []
-        for t in sorted_txns:
-            running_total += t["amount"]
-            d = datetime.fromisoformat(t["date"])
-            points.append((d, running_total))
-
-        # Downsample to last 60 points for readability
-        if len(points) > 60:
-            points = points[-60:]
-
-        dates = [p[0] for p in points]
-        balances = [p[1] for p in points]
-
-        fig = Figure(figsize=(12, 2), dpi=100, facecolor=self.card_bg_light)
-        ax = fig.add_subplot(111)
-        ax.set_facecolor(self.card_bg)
-        line_color = self.success if balances[-1] >= 0 else self.danger
-        ax.plot(dates, balances, color=line_color, linewidth=2.5)
-        ax.fill_between(dates, balances, color=line_color, alpha=0.15)
-        ax.axhline(0, color=self.text_muted, linewidth=1, linestyle="--", alpha=0.5)
-        ax.tick_params(colors=self.text_muted, labelsize=9)
-        ax.grid(True, linestyle="--", alpha=0.2, color=self.border)
-        fig.autofmt_xdate(rotation=0, ha="center")
-        for spine in ax.spines.values():
-            spine.set_color(self.border)
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=self.networth_chart_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    # ---------- Budget ----------
-    def set_budget(self, amount):
-        if amount >= 1000:
-            self.data.budget = amount
-            self.data.save_budget()
-            self.update_budget_ui()
-            self.update_stats()
-            if self.current_view == "dashboard":
-                self.update_dashboard()
-
-    def update_budget_ui(self):
-        if not hasattr(self, "budget_display"):
-            return
-        self.budget_display.configure(text=f"\u20b1{self.data.budget:,.2f}")
-        self.budget_slider.set(self.data.budget)
-        spent = abs(sum(t["amount"] for t in self.data.transactions if t["amount"] < 0))
-        usage = (spent / self.data.budget) if self.data.budget > 0 else 0
-        bar_color = self.danger if usage >= 1.0 else (self.warning if usage >= 0.8 else self.cyan)
-        self.budget_progress.configure(progress_color=bar_color)
-        self.budget_progress.set(min(usage, 1.0))
-        remaining = self.data.budget - spent
-        self.budget_stats.configure(text=f"Spent: \u20b1{spent:,.2f}  |  Remaining: \u20b1{remaining:,.2f}")
-
-    # ---------- Goals ----------
-    def add_goal(self):
-        name = self.goal_name_entry.get().strip()
-        target_str = self.goal_target_entry.get().strip()
-        if not name or not target_str:
-            messagebox.showerror("Error", "Please fill both fields.")
-            return
-        try:
-            target = float(target_str)
-        except ValueError:
-            messagebox.showerror("Error", "Invalid target amount.")
-            return
-        if target <= 0:
-            messagebox.showerror("Error", "Target must be greater than zero.")
-            return
-        self.data.add_goal(name, target)
-        self.goal_name_entry.delete(0, "end")
-        self.goal_target_entry.delete(0, "end")
-        self.refresh_goals()
-        if self.current_view == "dashboard":
-            self.update_dashboard()
-
-    def refresh_goals(self):
-        if not hasattr(self, "goals_container"):
-            return
-        for w in self.goals_container.winfo_children():
-            w.destroy()
-        if not self.data.goals:
-            ctk.CTkLabel(self.goals_container, text="\u2728 No goals yet. Create one above! \u2728",
-                          font=("Segoe UI", 13), text_color=self.text_muted).pack(pady=30)
-            return
-        for goal in self.data.goals:
-            g_frame = ctk.CTkFrame(self.goals_container, fg_color=self.card_bg, corner_radius=12, border_width=1, border_color=self.border)
-            g_frame.pack(fill="x", pady=8, padx=5)
-
-            header = ctk.CTkFrame(g_frame, fg_color="transparent")
-            header.pack(fill="x", padx=12, pady=(8, 0))
-            ctk.CTkLabel(header, text=goal["name"], font=("Segoe UI", 12, "bold"), text_color=self.cyan).pack(side="left")
-            del_btn = ctk.CTkButton(header, text="\u2716", width=30, height=30, fg_color="transparent",
-                                     text_color=self.danger, hover_color="#4A1A2A",
-                                     command=lambda gid=goal["id"]: self.delete_goal(gid))
-            del_btn.pack(side="right")
-
-            percent = (goal["current"] / goal["target"] * 100) if goal["target"] > 0 else 0
-            ctk.CTkLabel(g_frame, text=f"\u20b1{goal['current']:,.0f} / \u20b1{goal['target']:,.0f}  ({percent:.0f}%)",
-                          font=("Segoe UI", 10), text_color=self.text_muted).pack(anchor="w", padx=12)
-            prog_color = self.success if percent >= 100 else self.cyan
-            prog = ctk.CTkProgressBar(g_frame, height=8, corner_radius=4, progress_color=prog_color)
-            prog.pack(pady=5, padx=12, fill="x")
-            prog.set(min(percent / 100, 1.0))
-
-            btn_row = ctk.CTkFrame(g_frame, fg_color="transparent")
-            btn_row.pack(pady=8)
-            for amt in [50, 100, 500]:
-                btn = ctk.CTkButton(btn_row, text=f"+\u20b1{amt}", width=70, height=28, fg_color="#2A2D37",
-                                     command=lambda a=amt, gid=goal["id"]: self.add_to_goal(gid, a))
-                btn.pack(side="left", padx=4)
-            custom_entry = ctk.CTkEntry(btn_row, width=100, placeholder_text="Custom")
-            custom_entry.pack(side="left", padx=8)
-            add_custom = ctk.CTkButton(btn_row, text="Add", width=50, height=28, fg_color=self.purple,
-                                        command=lambda gid=goal["id"], e=custom_entry: self.custom_add_to_goal(gid, e))
-            add_custom.pack(side="left")
-
-    def add_to_goal(self, goal_id, amount):
-        self.data.update_goal(goal_id, amount)
-        self.refresh_goals()
-        if self.current_view == "dashboard":
-            self.update_dashboard()
-
-    def custom_add_to_goal(self, goal_id, entry):
-        try:
-            amt = float(entry.get().strip())
-            if amt <= 0:
-                raise ValueError
-            self.data.update_goal(goal_id, amt)
-            entry.delete(0, "end")
-            self.refresh_goals()
-            if self.current_view == "dashboard":
-                self.update_dashboard()
-        except ValueError:
-            messagebox.showerror("Error", "Enter a positive number.")
-
-    def delete_goal(self, goal_id):
-        if messagebox.askyesno("Delete Goal", "Delete this goal permanently?"):
-            self.data.delete_goal(goal_id)
-            self.refresh_goals()
-            if self.current_view == "dashboard":
-                self.update_dashboard()
+            self._refresh_recurring()
 
 
-# ------------------------------------------------------------
-# Run
-# ------------------------------------------------------------
+# ── Helper widgets ──────────────────────────────────────────────────────────
+
+def make_card(parent, app, padx=0, pady=0, corner=18, expand=False, fill="x"):
+    f = ctk.CTkFrame(parent, fg_color=app.card, corner_radius=corner,
+                     border_width=1, border_color=app.border)
+    f.pack(fill=fill, expand=expand, padx=padx, pady=pady)
+    return f
+
+def card_title(parent, app, title, subtitle=None, icon=None):
+    hdr = ctk.CTkFrame(parent, fg_color="transparent")
+    hdr.pack(fill="x", padx=18, pady=(14, 2))
+    lbl_text = f"{icon}  {title}" if icon else title
+    ctk.CTkLabel(hdr, text=lbl_text,
+                 font=(FONT_FAMILY, 14, "bold"), text_color=app.cyan).pack(anchor="w")
+    if subtitle:
+        ctk.CTkLabel(hdr, text=subtitle,
+                     font=(FONT_FAMILY, 11), text_color=app.text_muted).pack(anchor="w")
+
+def section_sep(parent, app):
+    ctk.CTkFrame(parent, height=1, fg_color=app.border).pack(fill="x", padx=18, pady=6)
+
+
+# ── Entry ────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     app = TribbyApp()
     app.mainloop()
